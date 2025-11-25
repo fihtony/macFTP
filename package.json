@@ -1,0 +1,115 @@
+{
+  "name": "macftp",
+  "productName": "MacFTP",
+  "version": "1.0.0",
+  "description": "FTP/SFTP Client for macOS - A modern file transfer application",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:electron\" \"npm run dev:vite\"",
+    "dev:vite": "vite",
+    "dev:electron": "wait-on tcp:5173 && tsc -p tsconfig.main.json && cross-env NODE_ENV=development electron .",
+    "build": "tsc -p tsconfig.main.json && vite build",
+    "build:app": "npm run build && electron-builder",
+    "build:mac": "npm run build && electron-builder --mac",
+    "build:dmg": "npm run build && electron-builder --mac dmg",
+    "preview": "vite preview"
+  },
+  "keywords": [],
+  "author": {
+    "name": "Tony Xu",
+    "email": "fihtony@gmail.com",
+    "url": "https://github.com/fihtony/macFTP"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fihtony/macFTP.git"
+  },
+  "homepage": "https://github.com/fihtony/macFTP#readme",
+  "bugs": {
+    "url": "https://github.com/fihtony/macFTP/issues"
+  },
+  "type": "commonjs",
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.17",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.6",
+    "@types/react-dom": "^19.2.3",
+    "@types/ssh2-sftp-client": "^9.0.5",
+    "@vitejs/plugin-react": "^5.1.1",
+    "autoprefixer": "^10.4.22",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^39.2.3",
+    "electron-builder": "^26.0.12",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.17",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.4",
+    "wait-on": "^9.0.3"
+  },
+  "dependencies": {
+    "basic-ftp": "^5.0.5",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.1.0",
+    "electron-squirrel-startup": "^1.0.1",
+    "electron-store": "^11.0.2",
+    "keytar": "^7.9.0",
+    "lucide-react": "^0.554.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "ssh2-sftp-client": "^12.0.1",
+    "tailwind-merge": "^3.4.0",
+    "uuid": "^13.0.0",
+    "zustand": "^5.0.8"
+  },
+  "build": {
+    "appId": "com.macftp.app",
+    "productName": "MacFTP",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "assets/icons/icon.png",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "extendInfo": {
+        "CFBundleName": "MacFTP",
+        "CFBundleDisplayName": "MacFTP",
+        "CFBundlePackageType": "APPL",
+        "CFBundleShortVersionString": "1.0.0"
+      }
+    },
+    "dmg": {
+      "title": "${productName}-${version}",
+      "icon": "assets/icons/icon.png",
+      "background": null,
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
