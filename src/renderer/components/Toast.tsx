@@ -3,7 +3,7 @@ import { X, CheckCircle2 } from 'lucide-react';
 
 interface ToastProps {
   message: string;
-  type?: 'success' | 'error' | 'info';
+  type?: 'success' | 'error' | 'info' | 'warning';
   duration?: number;
   onClose: () => void;
   showDownloadManager?: boolean;
@@ -38,6 +38,8 @@ const Toast: React.FC<ToastProps> = ({ message, type = 'info', duration = 3000, 
               ? 'bg-green-500/95 text-white border-green-600' 
               : type === 'error'
               ? 'bg-red-500/95 text-white border-red-600'
+              : type === 'warning'
+              ? 'bg-yellow-500/95 text-white border-yellow-600'
               : 'bg-background/95 text-foreground border-border'
           }
         `}

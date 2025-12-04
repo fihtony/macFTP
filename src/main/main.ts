@@ -200,9 +200,10 @@ ipcMain.handle('window:close', () => {
 ipcMain.handle('dialog:selectFile', async (event, options) => {
   const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
   if (!win) return { cancelled: true };
+  const properties = options.properties || ['openFile'];
   const result = await dialog.showOpenDialog(win, {
     ...options,
-    properties: ['openFile'],
+    properties,
   });
   return result;
 });

@@ -1,107 +1,51 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { Folder, Server, Plus, Trash2, Settings, X, Save, ChevronRight, ChevronDown, FolderOpen, Edit2, Play, Power, Key } from 'lucide-react';
+import React, { useState, useMemo } from 'react';
+import { Folder, Server, Plus, Trash2, Settings, ChevronRight, ChevronDown, FolderOpen, Edit2, Play, Power, Network, Lock } from 'lucide-react';
 import { Site, useStore } from '../store';
 import { v4 as uuidv4 } from 'uuid';
 import ConnectionProgressDialog from './ConnectionProgressDialog';
+import FtpServerModal from './FtpServerModal';
+import ContextMenu from './ContextMenu';
+import DeleteSiteDialog from './DeleteSiteDialog';
+import ConfirmDialog from './ConfirmDialog';
 
 const Sidebar = () => {
-  const { sites, addSite, updateSite, removeSite, isConnected } = useStore();
-  const [isAdding, setIsAdding] = useState(false);
+  const { sites, addSite, updateSite, removeSite, isConnected, currentSite } = useStore();
+  const [showModal, setShowModal] = useState(false);
   const [editingSite, setEditingSite] = useState<Site | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({ 'General': true });
-  
-  const [formData, setFormData] = useState<Partial<Site>>({
-    name: 'My Site',
-    host: '',
-    port: 22,
-    user: '',
-    password: '',
-    protocol: 'sftp',
-    group: 'General',
-    privateKeyPath: '',
-    privateKeyContent: '',
-    initialPath: '/'
-  });
-
-  const [showKeyContent, setShowKeyContent] = useState(false);
-
-  const resetForm = () => {
-    setFormData({ name: '', host: '', port: 22, user: '', password: '', protocol: 'sftp', group: 'General', privateKeyPath: '', privateKeyContent: '', initialPath: '/' });
-    setShowKeyContent(false);
-  };
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; site: Site } | null>(null);
+  const [siteToDelete, setSiteToDelete] = useState<Site | null>(null);
+  const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
 
   const handleAdd = () => {
-    if (!formData.host || !formData.user) {
-      alert('Please fill in Host and User fields');
-      return;
-    }
-
-    const id = uuidv4();
-    const newSite: Site = {
-      id,
-      name: formData.name || formData.host,
-      host: formData.host,
-      port: formData.port || 22,
-      user: formData.user,
-      password: formData.password,
-      privateKeyPath: formData.privateKeyPath,
-      privateKeyContent: formData.privateKeyContent,
-      protocol: formData.protocol as 'ftp' | 'sftp',
-      group: formData.group || 'General',
-      initialPath: formData.initialPath || '/'
-    };
-
-    addSite(newSite);
-    
-    if (newSite.group) {
-        setExpandedGroups(prev => ({ ...prev, [newSite.group!]: true }));
-    }
-
-    setIsAdding(false);
-    resetForm();
-  };
-
-  const handleEdit = (site: Site, e: React.MouseEvent) => {
-    e.stopPropagation();
-    setEditingSite(site);
-    setFormData({
-      name: site.name,
-      host: site.host,
-      port: site.port,
-      user: site.user,
-      password: site.password || '',
-      protocol: site.protocol,
-      group: site.group || 'General',
-      privateKeyPath: site.privateKeyPath || '',
-      privateKeyContent: site.privateKeyContent || '',
-      initialPath: site.initialPath || '/'
-    });
-    setShowKeyContent(!!site.privateKeyContent);
-    setIsAdding(false);
-  };
-
-  const handleSaveEdit = () => {
-    if (!editingSite || !formData.host || !formData.user) {
-      alert('Please fill in Host and User fields');
-      return;
-    }
-
-    updateSite(editingSite.id, {
-      name: formData.name || formData.host,
-      host: formData.host,
-      port: formData.port || 22,
-      user: formData.user,
-      password: formData.password,
-      privateKeyPath: formData.privateKeyPath,
-      privateKeyContent: formData.privateKeyContent,
-      protocol: formData.protocol as 'ftp' | 'sftp',
-      group: formData.group || 'General',
-      initialPath: formData.initialPath || '/'
-    });
-
     setEditingSite(null);
-    resetForm();
+    setShowModal(true);
+  };
+
+  const handleEdit = (site: Site) => {
+    setEditingSite(site);
+    setShowModal(true);
+    setContextMenu(null);
+  };
+
+  const handleContextMenu = (e: React.MouseEvent, site: Site) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ x: e.clientX, y: e.clientY, site });
+  };
+
+  const handleSave = (siteData: Omit<Site, 'id'>) => {
+    if (editingSite) {
+      updateSite(editingSite.id, siteData);
+    } else {
+      const id = uuidv4();
+      const newSite: Site = { ...siteData, id };
+      addSite(newSite);
+      if (newSite.group) {
+        setExpandedGroups(prev => ({ ...prev, [newSite.group!]: true }));
+      }
+    }
   };
 
   const connectionProgress = useStore((state) => state.connectionProgress);
@@ -162,8 +106,43 @@ const Sidebar = () => {
   };
 
   const handleDisconnect = async () => {
+    // Check if there are active downloads
+    const downloads = useStore.getState().downloads;
+    const activeDownloads = downloads.filter(d => 
+      d.status === 'downloading' || d.status === 'queued'
+    );
+    
+    if (activeDownloads.length > 0) {
+      // Show confirmation dialog
+      setShowDisconnectConfirm(true);
+      return;
+    }
+    
+    // No active downloads, proceed with disconnect
+    performDisconnect();
+  };
+
+  const performDisconnect = async () => {
     const electron = (window as any).electronAPI;
     if (electron) {
+      // Cancel all active downloads first
+      const downloads = useStore.getState().downloads;
+      const activeDownloads = downloads.filter(d => 
+        d.status === 'downloading' || d.status === 'queued'
+      );
+      
+      // Mark all active downloads as failed
+      activeDownloads.forEach(download => {
+        useStore.getState().updateDownload(download.id, {
+          status: 'failed',
+          error: 'Connection terminated by user',
+          downloadedSize: 0,
+          speed: undefined,
+          eta: undefined,
+          endTime: Date.now()
+        });
+      });
+      
       // Close any open previews and clear temp file path
       useStore.getState().setTempFilePath(null);
       
@@ -190,6 +169,26 @@ const Sidebar = () => {
     return groups;
   }, [sites]);
 
+  const isSiteConnected = (site: Site) => {
+    return isConnected && currentSite?.id === site.id;
+  };
+
+  const usesSshKey = (site: Site) => {
+    return !!(site.privateKeyPath || site.privateKeyContent);
+  };
+
+  const handleDeleteSite = (site: Site) => {
+    setSiteToDelete(site);
+    setContextMenu(null);
+  };
+
+  const confirmDeleteSite = () => {
+    if (siteToDelete) {
+      removeSite(siteToDelete.id);
+      setSiteToDelete(null);
+    }
+  };
+
   return (
     <>
       {connectionProgress?.isConnecting && (
@@ -199,258 +198,185 @@ const Sidebar = () => {
           onCancel={handleCancelConnection}
         />
       )}
-    <div className="h-full w-full bg-secondary/30 flex flex-col">
-      <div className="p-4 border-b border-border flex items-center justify-between">
-        <span className="font-semibold text-sm uppercase tracking-wider text-muted-foreground">Sites</span>
-        <button 
-          onClick={() => {
-            setIsAdding(true);
-            setEditingSite(null);
-            resetForm();
-          }} 
-          className="p-1 hover:bg-accent rounded"
-        >
-            <Plus size={16} />
-        </button>
-      </div>
+      
+      <FtpServerModal
+        isOpen={showModal}
+        site={editingSite}
+        onClose={() => {
+          setShowModal(false);
+          setEditingSite(null);
+        }}
+        onSave={handleSave}
+      />
 
-      {(isAdding || editingSite) && (
-          <div className="p-4 bg-background/50 border-b border-border space-y-2 text-xs">
-              <div className="font-semibold text-sm mb-2">{editingSite ? 'Edit Site' : 'Add New Site'}</div>
-              <input 
-                className="w-full p-1.5 bg-input rounded border border-border" 
-                placeholder="Name" 
-                value={formData.name} 
-                onChange={e => setFormData({...formData, name: e.target.value})} 
-              />
-              <div className="flex gap-2">
-                  <select 
-                    className="bg-input rounded p-1.5 border border-border" 
-                    value={formData.protocol} 
-                    onChange={e => setFormData({...formData, protocol: e.target.value as any})}
-                  >
-                      <option value="sftp">SFTP</option>
-                      <option value="ftp">FTP</option>
-                  </select>
-                  <input 
-                    className="flex-1 p-1.5 bg-input rounded border border-border" 
-                    placeholder="Host" 
-                    value={formData.host} 
-                    onChange={e => setFormData({...formData, host: e.target.value})} 
-                  />
-              </div>
-              <input 
-                className="w-full p-1.5 bg-input rounded border border-border" 
-                placeholder="Port" 
-                type="number" 
-                value={formData.port} 
-                onChange={e => setFormData({...formData, port: parseInt(e.target.value) || 22})} 
-              />
-              <input 
-                className="w-full p-1.5 bg-input rounded border border-border" 
-                placeholder="User" 
-                value={formData.user} 
-                onChange={e => setFormData({...formData, user: e.target.value})} 
-              />
-              <input 
-                className="w-full p-1.5 bg-input rounded border border-border" 
-                placeholder="Password" 
-                type="password" 
-                value={formData.password} 
-                onChange={e => setFormData({...formData, password: e.target.value})} 
-              />
-              <input 
-                className="w-full p-1.5 bg-input rounded border border-border" 
-                placeholder="Group" 
-                value={formData.group} 
-                onChange={e => setFormData({...formData, group: e.target.value})} 
-              />
-              <input 
-                className="w-full p-1.5 bg-input rounded border border-border text-xs font-mono" 
-                placeholder="Initial Path (e.g. /home/user/docs)" 
-                value={formData.initialPath || '/'} 
-                onChange={e => setFormData({...formData, initialPath: e.target.value || '/'})} 
-              />
-              
-              {/* SSH Key Authentication (SFTP only) */}
-              {formData.protocol === 'sftp' && (
-                <div className="space-y-2 pt-1 border-t border-border">
-                  <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
-                    <Key size={12} />
-                    <span>SSH Key Authentication (Optional)</span>
-                  </div>
-                  
-                  {/* Key Path */}
-                  <div className="flex gap-2">
-                    <input 
-                      className="flex-1 p-1.5 bg-input rounded border border-border text-xs" 
-                      placeholder="Private Key Path" 
-                      value={formData.privateKeyPath || ''} 
-                      onChange={e => setFormData({...formData, privateKeyPath: e.target.value, privateKeyContent: ''})} 
-                    />
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const electron = (window as any).electronAPI;
-                        if (electron) {
-                          const result = await electron.selectFile({
-                            filters: [
-                              { name: 'SSH Keys', extensions: ['pem', 'key', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519'] },
-                              { name: 'All Files', extensions: ['*'] }
-                            ]
-                          });
-                          if (!result.cancelled && result.filePaths && result.filePaths[0]) {
-                            setFormData({...formData, privateKeyPath: result.filePaths[0], privateKeyContent: ''});
-                            setShowKeyContent(false);
-                          }
-                        }
-                      }}
-                      className="px-2 py-1.5 bg-accent hover:bg-accent/80 rounded text-xs flex items-center gap-1"
-                      title="Browse for SSH key file"
-                    >
-                      <FolderOpen size={12} />
-                    </button>
-                  </div>
-                  
-                  {/* Or paste key content */}
-                  <div className="text-[10px] text-muted-foreground text-center">OR</div>
-                  
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowKeyContent(!showKeyContent);
-                      if (!showKeyContent) {
-                        setFormData({...formData, privateKeyPath: ''}); // Clear path when using content
-                      }
-                    }}
-                    className="w-full px-2 py-1.5 bg-accent/50 hover:bg-accent rounded text-xs flex items-center justify-center gap-1"
-                  >
-                    <Key size={12} />
-                    {showKeyContent ? 'Hide' : 'Paste'} SSH Key Content
-                  </button>
-                  
-                  {showKeyContent && (
-                    <textarea
-                      className="w-full p-1.5 bg-input rounded border border-border text-xs font-mono resize-none"
-                      placeholder="Paste your SSH private key here (starts with -----BEGIN...)"
-                      rows={4}
-                      value={formData.privateKeyContent || ''}
-                      onChange={e => setFormData({...formData, privateKeyContent: e.target.value, privateKeyPath: ''})}
-                    />
-                  )}
-                </div>
-              )}
-              
-              <div className="flex justify-end gap-2 mt-2">
-                  <button 
-                    onClick={() => {
-                      setIsAdding(false);
-                      setEditingSite(null);
-                      resetForm();
-                    }} 
-                    className="px-3 py-1.5 hover:bg-accent rounded text-sm"
-                  >
-                    <X size={14} className="inline mr-1" />
-                    Cancel
-                  </button>
-                  <button 
-                    onClick={editingSite ? handleSaveEdit : handleAdd} 
-                    className="px-3 py-1.5 bg-primary text-primary-foreground rounded text-sm"
-                  >
-                    <Save size={14} className="inline mr-1" />
-                    {editingSite ? 'Save' : 'Add'}
-                  </button>
-              </div>
-          </div>
+      <DeleteSiteDialog
+        isOpen={!!siteToDelete}
+        site={siteToDelete}
+        onClose={() => setSiteToDelete(null)}
+        onConfirm={confirmDeleteSite}
+      />
+
+      {showDisconnectConfirm && (
+        <ConfirmDialog
+          title="Active Downloads in Progress"
+          message={`${useStore.getState().downloads.filter(d => d.status === 'downloading' || d.status === 'queued').length} download(s) are currently in progress. Disconnecting will terminate all active downloads. Do you want to continue?`}
+          onConfirm={() => {
+            setShowDisconnectConfirm(false);
+            performDisconnect();
+          }}
+          onCancel={() => setShowDisconnectConfirm(false)}
+          confirmText="Disconnect"
+          variant="danger"
+        />
       )}
 
-      <div className="flex-1 overflow-y-auto p-2 space-y-1">
-        {sites.length === 0 && !isAdding && !editingSite && (
-            <div className="text-center p-4 text-xs text-muted-foreground">
-                No sites saved. <br/><br/>
-                <strong>Demo Server:</strong><br/>
-                Host: test.rebex.net<br/>
-                Port: 22<br/>
-                User: demo<br/>
-                Pass: password
-            </div>
-        )}
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          items={[
+            ...(isSiteConnected(contextMenu.site)
+              ? [
+                  {
+                    label: 'Disconnect',
+                    icon: <Power size={14} />,
+                    onClick: () => handleDisconnect(),
+                    disabled: false
+                  },
+                  { separator: true },
+                  {
+                    label: 'Edit',
+                    icon: <Edit2 size={14} />,
+                    onClick: () => handleEdit(contextMenu.site),
+                    disabled: true
+                  },
+                  {
+                    label: 'Delete',
+                    icon: <Trash2 size={14} />,
+                    onClick: () => handleDeleteSite(contextMenu.site),
+                    disabled: true
+                  }
+                ]
+              : [
+                  {
+                    label: 'Connect',
+                    icon: <Play size={14} />,
+                    onClick: () => handleConnect(contextMenu.site),
+                    disabled: isConnected
+                  },
+                  { separator: true },
+                  {
+                    label: 'Edit',
+                    icon: <Edit2 size={14} />,
+                    onClick: () => handleEdit(contextMenu.site),
+                    disabled: false
+                  },
+                  {
+                    label: 'Delete',
+                    icon: <Trash2 size={14} />,
+                    onClick: () => handleDeleteSite(contextMenu.site),
+                    disabled: false
+                  }
+                ])
+          ]}
+        />
+      )}
 
-        {Object.entries(groupedSites).map(([group, groupSites]) => (
-            <div key={group} className="mb-2">
-                <div 
-                    className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-muted-foreground cursor-pointer hover:text-foreground transition-colors"
-                    onClick={() => toggleGroup(group)}
-                >
-                    {expandedGroups[group] ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                    <FolderOpen size={12} />
-                    <span>{group}</span>
-                </div>
-                
-                {expandedGroups[group] && (
-                    <div className="pl-2 mt-1 space-y-1">
-                        {groupSites.map(site => (
-                            <div 
-                              key={site.id} 
-                              className={`
-                                group flex flex-col gap-1 p-2 rounded border border-border/50
-                                ${isConnected ? 'bg-accent/30' : 'hover:bg-accent/50'}
-                                transition-colors
-                              `}
-                            >
-                              <div className="flex items-center justify-between">
-                                <div 
-                                  className="flex items-center gap-2 overflow-hidden flex-1 cursor-pointer"
-                                  onClick={() => handleConnect(site)}
-                                >
-                                  <Server size={16} className="text-primary flex-shrink-0" />
-                                  <div className="flex flex-col overflow-hidden min-w-0">
-                                    <span className="text-sm font-medium truncate">{site.name}</span>
-                                    <span className="text-[10px] text-muted-foreground truncate">{site.user}@{site.host}</span>
-                                  </div>
-                                </div>
-                                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                  <button 
-                                    onClick={(e) => handleEdit(site, e)} 
-                                    className="p-1 hover:text-primary rounded"
-                                    title="Edit"
-                                  >
-                                    <Edit2 size={14} />
-                                  </button>
-                                  <button 
-                                    onClick={(e) => { e.stopPropagation(); removeSite(site.id); }} 
-                                    className="p-1 hover:text-destructive rounded"
-                                    title="Delete"
-                                  >
-                                    <Trash2 size={14} />
-                                  </button>
-                                </div>
-                              </div>
-                              
-                              <div className="flex gap-1">
-                                <button
-                                  onClick={(e) => handleConnect(site, e)}
-                                  className={`
-                                    flex-1 px-2 py-1 text-xs rounded flex items-center justify-center gap-1
-                                    ${isConnected 
-                                      ? 'bg-secondary text-secondary-foreground cursor-not-allowed' 
-                                      : 'bg-primary text-primary-foreground hover:opacity-90'
-                                    }
-                                  `}
-                                  disabled={isConnected}
-                                  title={isConnected ? 'Disconnect first' : 'Connect'}
-                                >
-                                  <Play size={12} />
-                                  Connect
-                                </button>
-                              </div>
-                            </div>
-                        ))}
-                    </div>
-                )}
+      <div className="h-full w-full bg-secondary/30 flex flex-col">
+        <div className="p-4 border-b border-border flex items-center justify-between">
+          <span className="font-semibold text-sm uppercase tracking-wider text-muted-foreground">Sites</span>
+          <button 
+            onClick={handleAdd} 
+            className="p-1 hover:bg-accent rounded"
+            title="Add new site"
+          >
+            <Plus size={16} />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+          {sites.length === 0 && !showModal && (
+            <div className="text-center p-4 text-xs text-muted-foreground">
+              No sites saved. <br/><br/>
+              <strong>Demo Server:</strong><br/>
+              Host: test.rebex.net<br/>
+              Port: 22<br/>
+              User: demo<br/>
+              Pass: password
             </div>
-        ))}
-      </div>
+          )}
+
+          {Object.entries(groupedSites).map(([group, groupSites]) => (
+            <div key={group} className="mb-2">
+              <div 
+                className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-muted-foreground cursor-pointer hover:text-foreground transition-colors"
+                onClick={() => toggleGroup(group)}
+              >
+                {expandedGroups[group] ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                <FolderOpen size={12} />
+                <span>{group}</span>
+              </div>
+              
+              {expandedGroups[group] && (
+                <div className="pl-2 mt-1 space-y-1">
+                  {groupSites.map(site => {
+                    const connected = isSiteConnected(site);
+                    const hasSshKey = usesSshKey(site);
+                    const IconComponent = site.protocol === 'sftp' ? Lock : Network;
+                    
+                    return (
+                      <div 
+                        key={site.id} 
+                        className={`
+                          group relative p-2.5 rounded border transition-colors cursor-pointer
+                          ${connected 
+                            ? 'bg-primary/10 border-primary/30' 
+                            : 'border-border/50 hover:bg-accent/30'
+                          }
+                        `}
+                        onContextMenu={(e) => handleContextMenu(e, site)}
+                        onClick={() => !isConnected && !connected && handleConnect(site)}
+                        title={connected 
+                          ? 'Connected - Right-click for menu' 
+                          : !isConnected 
+                            ? 'Click to connect or right-click for menu' 
+                            : currentSite 
+                              ? `${currentSite.name} is connected - Right-click for menu`
+                              : 'Another FTP is connected - Right-click for menu'}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <IconComponent 
+                            size={16} 
+                            className={`flex-shrink-0 ${site.protocol === 'sftp' ? 'text-blue-400' : 'text-orange-400'}`} 
+                          />
+                          <div className="flex flex-col overflow-hidden min-w-0 flex-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-sm font-medium truncate">{site.name}</span>
+                              {hasSshKey && (
+                                <span className="text-[9px] px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded border border-blue-500/30 flex-shrink-0 ml-auto">
+                                  SSH
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[10px] text-muted-foreground truncate">{site.user}@{site.host}</span>
+                              {connected && (
+                                <span className="text-[9px] font-medium text-green-500 flex-shrink-0">
+                                  Connected
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
       
       {/* Connection Status & Settings */}
       <div className="border-t border-border">

@@ -113,3 +113,15 @@
 .animate-slide-in {
   animation: slide-in 0.2s ease-out forwards;
 }
+
+@keyframes slide {
+  0% {
+    left: 0%;
+  }
+  50% {
+    left: 80%;
+  }
+  100% {
+    left: 0%;
+  }
+}

@@ -99,3 +99,10 @@ tsconfig.tsbuildinfo
 
 # Yarn Integrity file
 .yarn-integrity
+
+# Database files (extra safety - database files are stored in user data directory)
+macftp-data.json
+macftp-key.json
+*.sqlite
+*.sqlite3
+*.db

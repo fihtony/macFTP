@@ -108,6 +108,21 @@ Here are some public test servers you can use to test the application:
 - **SpeedTest FTP**: `speedtest.tele2.net` (Anonymous login)
 - **FileZilla Test Server**: `demo.wftpserver.com` (Username: `demo-user`, Password: `demo-user`)
 
+### 4. Local SFTP Sandbox (Docker)
+- **Folder**: `testserver/`
+- **Host**: `localhost`
+- **Port**: `2222`
+- **Protocol**: SFTP
+- **Username**: `testuser`
+- **Password**: `testpass`
+- **Start**: `cd testserver && docker compose up -d --build`
+- **Stop**: `cd testserver && docker compose down`
+- **Data**: Files persist under `testserver/data/upload/` on your host
+- **Throttle**: `cd testserver && ./limit_bandwidth.sh 1600kbit` (≈200 KB/s); run `./remove_bandwidth_limit.sh` to reset
+
+Use this when you need guaranteed upload/create/download permissions or want
+to experiment without depending on public demo servers.
+
 ## Tech Stack
 
 - **Runtime**: [Electron](https://www.electronjs.org/) v39

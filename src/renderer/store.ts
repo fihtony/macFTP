@@ -13,6 +13,7 @@ export interface Site {
   protocol: 'ftp' | 'sftp';
   group?: string;
   initialPath?: string; // Initial folder path to navigate to after connection
+  defaultDownloadPath?: string; // Default download path for this FTP server
 }
 
 export interface RemoteFile {
@@ -23,6 +24,10 @@ export interface RemoteFile {
   rights: any;
   owner: any;
   group: any;
+}
+
+interface UpdateOptions {
+  persist?: boolean;
 }
 
 interface AppState {
@@ -48,12 +53,12 @@ interface AppState {
   // Download queue and history
   downloads: DownloadItem[];
   addDownload: (download: DownloadItem) => void;
-  updateDownload: (id: string, updates: Partial<DownloadItem>) => void;
+  updateDownload: (id: string, updates: Partial<DownloadItem>, options?: UpdateOptions) => void;
   removeDownload: (id: string) => void;
   clearHistory: () => void;
-  pauseDownload: (id: string) => void;
-  resumeDownload: (id: string) => void;
   cancelDownload: (id: string) => void;
+  loadDownloads: () => Promise<void>;
+  saveDownloads: () => Promise<void>;
 
   // Connection progress
   connectionProgress: {
@@ -154,10 +159,13 @@ export const useStore = create<AppState>((set, get) => ({
     set((state) => ({ downloads: [...state.downloads, download] }));
     get().saveDownloads(); // Auto-save
   },
-  updateDownload: (id, updates) => {
+  updateDownload: (id, updates, options) => {
     set((state) => ({
       downloads: state.downloads.map(d => d.id === id ? { ...d, ...updates } : d)
     }));
+    if (options?.persist === false) {
+      return;
+    }
     get().saveDownloads(); // Auto-save
   },
   removeDownload: (id) => {
@@ -166,31 +174,22 @@ export const useStore = create<AppState>((set, get) => ({
     }));
     get().saveDownloads(); // Auto-save
   },
-  pauseDownload: (id) => {
-    set((state) => ({
-      downloads: state.downloads.map(d => 
-        d.id === id && d.status === 'downloading' 
-          ? { ...d, status: 'paused' as const }
-          : d
-      )
-    }));
-    get().saveDownloads(); // Auto-save
-  },
-  resumeDownload: (id) => {
-    set((state) => ({
-      downloads: state.downloads.map(d => 
-        d.id === id && d.status === 'paused' 
-          ? { ...d, status: 'queued' as const }
-          : d
-      )
-    }));
-    get().saveDownloads(); // Auto-save
-  },
   cancelDownload: (id) => {
+    const electron = (window as any).electronAPI;
+    if (electron?.cancelDownload) {
+      electron.cancelDownload(id);
+    }
     set((state) => ({
       downloads: state.downloads.map(d => 
-        d.id === id && (d.status === 'downloading' || d.status === 'paused' || d.status === 'queued')
-          ? { ...d, status: 'cancelled' as const, endTime: Date.now() }
+        d.id === id && (d.status === 'downloading' || d.status === 'queued')
+          ? { 
+              ...d, 
+              status: 'cancelled' as const, 
+              downloadedSize: 0,
+              speed: undefined,
+              eta: undefined,
+              endTime: Date.now() 
+            }
           : d
       )
     }));
@@ -199,7 +198,7 @@ export const useStore = create<AppState>((set, get) => ({
   clearHistory: () => {
     set((state) => ({
       downloads: state.downloads.filter(d => 
-        d.status === 'queued' || d.status === 'downloading' || d.status === 'paused'
+        d.status === 'queued' || d.status === 'downloading'
       )
     }));
     get().saveDownloads(); // Auto-save
@@ -211,7 +210,31 @@ export const useStore = create<AppState>((set, get) => ({
       console.log('[Store] Loading downloads from database:', result);
       if (result.success && result.downloads) {
         console.log('[Store] Loaded', result.downloads.length, 'downloads from database');
-        set({ downloads: result.downloads || [] });
+        
+        // Clean up any orphaned active downloads from previous session
+        // (downloads that were active when app closed should be marked as failed)
+        const cleanedDownloads = result.downloads.map((d: any) => {
+          if (d.status === 'downloading' || d.status === 'queued') {
+            console.log('[Store] Marking orphaned download as failed:', d.fileName);
+            return {
+              ...d,
+              status: 'failed' as const,
+              error: 'Download interrupted (app was closed)',
+              downloadedSize: 0,
+              speed: undefined,
+              eta: undefined,
+              endTime: Date.now()
+            };
+          }
+          return d;
+        });
+        
+        set({ downloads: cleanedDownloads });
+        
+        // Save the cleaned downloads back to database
+        if (cleanedDownloads.some((d: any, i: number) => d !== result.downloads[i])) {
+          get().saveDownloads();
+        }
       } else {
         console.warn('[Store] Failed to load downloads:', result.error);
       }

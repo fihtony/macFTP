@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { File, Folder, ArrowUp, RefreshCw, Download, Eye, X, Upload, Info, Edit3, Loader2, Save, Search, ZoomIn, ZoomOut, Maximize2, Minimize2 } from 'lucide-react';
+import { File, Folder, ArrowUp, RefreshCw, Download, Eye, X, Upload, Info, Edit3, Loader2, Save, Search, ZoomIn, ZoomOut, Maximize2, Minimize2, Trash2, FolderPlus } from 'lucide-react';
 import { useStore, RemoteFile } from '../store';
 import { DownloadItem } from './DownloadProgressDialog';
 import { format } from 'date-fns';
@@ -29,11 +29,44 @@ const getFileType = (fileName: string, type: string) => {
   return ext + ' file';
 };
 
+type UploadStatus = 'starting' | 'uploading' | 'paused' | 'completed' | 'cancelled' | 'failed';
+
+interface FolderUploadRequest {
+  folderName: string;
+  localPath: string;
+  remotePath: string;
+}
+
+interface UploadTaskState {
+  id: string;
+  status: UploadStatus;
+  uploadedBytes: number;
+  totalBytes: number;
+  completedFiles: number;
+  totalFiles: number;
+  currentFile?: string;
+  currentFileUploaded?: number;
+  currentFileSize?: number;
+  speed?: number;
+  folderName?: string;
+}
+
+interface DeleteDialogState {
+  file: RemoteFile | null;
+  requireRecursiveConfirm: boolean;
+  confirmChecked: boolean;
+  loading: boolean;
+  isDeleting: boolean;
+}
+
+const UPLOAD_FINAL_STATUSES: UploadStatus[] = ['completed', 'failed', 'cancelled'];
+
 const FileExplorer = () => {
   const { currentPath, remoteFiles, isLoading, setCurrentPath, setRemoteFiles, setLoading, isConnected, currentSite } = useStore();
   const addDownload = useStore((state) => state.addDownload);
   const updateDownload = useStore((state) => state.updateDownload);
   const removeDownload = useStore((state) => state.removeDownload);
+  const downloads = useStore((state) => state.downloads);
   const showDownloadManager = useStore((state) => state.showDownloadManager);
   const downloadManagerWidth = useStore((state) => state.downloadManagerWidth);
   const sidebarWidth = useStore((state) => state.sidebarWidth || 256);
@@ -55,15 +88,29 @@ const FileExplorer = () => {
   const [previewRemotePath, setPreviewRemotePath] = useState<string | null>(null);
   const [previewFileInfo, setPreviewFileInfo] = useState<RemoteFile | null>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [isCreateFolderModalOpen, setIsCreateFolderModalOpen] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
   const [searchText, setSearchText] = useState<string>('');
   const [searchMatches, setSearchMatches] = useState<number[]>([]);
   const [currentMatchIndex, setCurrentMatchIndex] = useState<number>(-1);
   const [imageScale, setImageScale] = useState<'fit' | '1:1' | number>('fit');
   const [originalImageSize, setOriginalImageSize] = useState<{ width: number; height: number } | null>(null);
+  const [folderUploadQueue, setFolderUploadQueue] = useState<FolderUploadRequest[]>([]);
+  const [activeUpload, setActiveUpload] = useState<UploadTaskState | null>(null);
+  const [duplicateAction, setDuplicateAction] = useState<'overwrite' | 'rename' | 'skip' | null>(null);
+  const [applyToAll, setApplyToAll] = useState(false);
+  const deleteDialogInitialState: DeleteDialogState = {
+    file: null,
+    requireRecursiveConfirm: false,
+    confirmChecked: false,
+    loading: false,
+    isDeleting: false
+  };
+  const [deleteDialog, setDeleteDialog] = useState<DeleteDialogState>(deleteDialogInitialState);
   const textPreviewRef = useRef<HTMLPreElement>(null);
   const imageContainerRef = useRef<HTMLDivElement>(null);
 
-  const handleNavigate = async (path: string) => {
+  const handleNavigate = useCallback(async (path: string) => {
     setLoading(true);
     const electron = (window as any).electronAPI;
     if (electron) {
@@ -77,130 +124,29 @@ const FileExplorer = () => {
             alert('Error listing directory: ' + result.error);
         }
     }
-  };
+  }, [setLoading, setCurrentPath, setRemoteFiles]);
 
-  const handleItemClick = (file: RemoteFile) => {
-      setSelectedFile(file.name);
-  };
-
-  const handleItemDoubleClick = async (file: RemoteFile) => {
-    if (file.type === 'd') {
-        setLoading(true); // Trigger loading state immediately for transition
-        const newPath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
-        handleNavigate(newPath);
-    } else {
-        // Preview file if it's a text or image file
-        const fileName = file.name.toLowerCase();
-        const isTextFile = ['.txt', '.md', '.json', '.xml', '.html', '.css', '.js', '.ts', '.jsx', '.tsx', '.log', '.conf', '.ini', '.yaml', '.yml', '.sh', '.bash', '.zsh'].some(ext => fileName.endsWith(ext));
-        const isImageFile = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico'].some(ext => fileName.endsWith(ext));
-        
-        const electron = (window as any).electronAPI;
-        if (!electron) {
-          console.error('Electron API not available');
-          return;
-        }
-        
-        const remotePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
-        console.log('Attempting to preview file:', file.name, 'Path:', remotePath);
-        console.log('File type check - isText:', isTextFile, 'isImage:', isImageFile);
-        
-        setLoading(true);
-        try {
-          const result = await electron.previewFile(remotePath, file.name);
-          console.log('Preview result:', { 
-            success: result.success, 
-            hasImageDataUrl: !!result.imageDataUrl, 
-            hasTextData: !!result.data,
-            hasTempPath: !!result.tempPath,
-            error: result.error,
-            isImage: result.isImage,
-            isText: result.isText
-          });
-          console.log('Preview result full object:', result);
-          console.log('Preview result keys:', Object.keys(result || {}));
-          console.log('Preview result imageDataUrl type:', typeof result?.imageDataUrl);
-          console.log('Preview result imageDataUrl length:', result?.imageDataUrl?.length);
-          
-          setLoading(false);
-          
-          if (result.success) {
-            const fileRemotePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
-            // Store file info for display
-            setPreviewFileInfo(file);
-            // Check for image data URL first
-            if (result.imageDataUrl) {
-              // For images, use base64 data URL for preview (Electron security)
-              console.log('Setting image preview');
-              setPreviewImage(result.imageDataUrl);
-              setTempFilePath(result.tempPath); // Keep temp path for save functionality
-              setPreviewFileName(file.name);
-              setPreviewRemotePath(fileRemotePath);
-            } else if (result.data) {
-              // For text files, show in preview modal
-              console.log('Setting text preview');
-              setPreviewFile(file.name);
-              setPreviewContent(result.data);
-              setPreviewFileName(file.name);
-              setPreviewRemotePath(fileRemotePath);
-              // Store temp path for text files too (for save functionality)
-              if (result.tempPath) {
-                setTempFilePath(result.tempPath);
-              }
-              // Reset search when opening new file
-              setSearchText('');
-              setSearchMatches([]);
-              setCurrentMatchIndex(-1);
-            } else {
-              console.error('Preview result mismatch - no imageDataUrl or data:', {
-                fileName: file.name,
-                isImageFile,
-                isTextFile,
-                hasImageDataUrl: !!result.imageDataUrl,
-                hasTextData: !!result.data,
-                resultIsImage: result.isImage,
-                resultIsText: result.isText,
-                fullResult: result
-              });
-              alert('Preview not available for this file type. File: ' + file.name + '. Check console for details.');
-            }
-          } else {
-            console.error('Preview failed:', result.error);
-            alert('Preview failed: ' + (result.error || 'Unknown error'));
-          }
-        } catch (err: any) {
-          setLoading(false);
-          console.error('Preview error:', err);
-          alert('Preview error: ' + err.message);
-        }
-    }
-  };
-
-  const handleUp = () => {
-    if (currentPath === '/') return;
-    const parts = currentPath.split('/').filter(Boolean);
-    parts.pop();
-    const newPath = '/' + parts.join('/');
-    handleNavigate(newPath);
-  };
-
-  const handleClosePreview = () => {
-    // Cleanup temp file when closing preview (for both text and image)
+  const handleClosePreview = useCallback((options?: { skipToast?: boolean; toastMessage?: string }) => {
+    const { skipToast, toastMessage } = options || {};
     const fileType = previewImage ? 'image' : 'text';
-    if (tempFilePath) {
-      const electron = (window as any).electronAPI;
-      if (electron) {
-        electron.cleanupTempFile(tempFilePath).then(() => {
-          setToast({ message: `Preview temporary ${fileType} file deleted`, type: 'success' });
-        }).catch((err: any) => {
-          console.error('Failed to cleanup temp file:', err);
-          // Still show toast even if cleanup fails
-          setToast({ message: `Preview ${fileType} file closed`, type: 'info' });
-        });
+    const electron = (window as any).electronAPI;
+    const notify = (message: string, type: 'success' | 'info' = 'info') => {
+      if (!skipToast) {
+        setToast({ message: toastMessage || message, type });
       }
-    } else {
-      // Even if no temp file, show toast to confirm preview closed
-      setToast({ message: `Preview ${fileType} file closed`, type: 'info' });
+    };
+
+    if (tempFilePath && electron) {
+      electron.cleanupTempFile(tempFilePath).then(() => {
+        notify(`Preview temporary ${fileType} file deleted`, 'success');
+      }).catch((err: any) => {
+        console.error('Failed to cleanup temp file:', err);
+        notify(`Preview ${fileType} file closed`, 'info');
+      });
+    } else if (!skipToast) {
+      notify(`Preview ${fileType} file closed`, 'info');
     }
+
     setPreviewImage(null);
     setPreviewContent(null);
     setPreviewFile(null);
@@ -213,6 +159,265 @@ const FileExplorer = () => {
     setCurrentMatchIndex(-1);
     setImageScale('fit');
     setOriginalImageSize(null);
+  }, [previewImage, tempFilePath, setToast]);
+
+  const handleItemClick = (file: RemoteFile) => {
+      setSelectedFile(file.name);
+  };
+
+  const previewFileHandler = useCallback(async (file: RemoteFile) => {
+    if (file.type === 'd') {
+      setLoading(true);
+        const newPath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+        handleNavigate(newPath);
+      return;
+    }
+
+    const fileName = file.name.toLowerCase();
+    const textExtensions = ['.txt', '.md', '.json', '.xml', '.html', '.css', '.js', '.ts', '.jsx', '.tsx', '.log', '.conf', '.ini', '.yaml', '.yml', '.sh', '.bash', '.zsh', '.gitignore'];
+    const isTextFile = textExtensions.some(ext => fileName.endsWith(ext)) || file.name.startsWith('.');
+    const isImageFile = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico'].some(ext => fileName.endsWith(ext));
+
+    const electron = (window as any).electronAPI;
+    if (!electron) {
+      console.error('Electron API not available');
+      return;
+    }
+
+    const remotePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+    console.log('Attempting to preview file:', file.name, 'Path:', remotePath);
+    console.log('File type check - isText:', isTextFile, 'isImage:', isImageFile);
+
+    setLoading(true);
+    try {
+      const result = await electron.previewFile(remotePath, file.name);
+      setLoading(false);
+
+      if (result.success) {
+        const fileRemotePath = remotePath;
+        setPreviewFileInfo(file);
+        if (result.imageDataUrl) {
+          setPreviewImage(result.imageDataUrl);
+          setTempFilePath(result.tempPath);
+          setPreviewFileName(file.name);
+          setPreviewRemotePath(fileRemotePath);
+        } else if (result.data) {
+          setPreviewFile(file.name);
+          setPreviewContent(result.data);
+          setPreviewFileName(file.name);
+          setPreviewRemotePath(fileRemotePath);
+          if (result.tempPath) {
+            setTempFilePath(result.tempPath);
+          }
+          setSearchText('');
+          setSearchMatches([]);
+          setCurrentMatchIndex(-1);
+        } else {
+          console.error('Preview result mismatch - no imageDataUrl or data:', result);
+          alert('Preview not available for this file type. File: ' + file.name + '. Check console for details.');
+          handleClosePreview({ skipToast: true });
+        }
+      } else {
+        console.error('Preview failed:', result.error);
+        alert('Preview failed: ' + (result.error || 'Unknown error'));
+        handleClosePreview({ skipToast: true });
+      }
+    } catch (err: any) {
+      setLoading(false);
+      console.error('Preview error:', err);
+      alert('Preview error: ' + err.message);
+      handleClosePreview({ skipToast: true });
+    }
+  }, [currentPath, handleNavigate, handleClosePreview, setLoading, setTempFilePath]);
+
+  const handleItemDoubleClick = async (file: RemoteFile) => {
+    previewFileHandler(file);
+  };
+
+  const buildRemotePath = (name: string) => currentPath === '/' ? `/${name}` : `${currentPath}/${name}`;
+
+  const enqueueFolderUpload = useCallback((request: FolderUploadRequest) => {
+    setFolderUploadQueue((prev) => [...prev, request]);
+  }, []);
+
+  const initiateFolderUpload = useCallback(async (request: FolderUploadRequest) => {
+    const electron = (window as any).electronAPI;
+    if (!electron) return;
+    try {
+      const response = await electron.uploadFolder(request.localPath, request.remotePath);
+      if (!response?.success) {
+        setToast({ message: `Failed to start folder upload: ${response?.error || 'Unknown error'}`, type: 'error' });
+        setActiveUpload(null);
+        return;
+      }
+      setActiveUpload({
+        id: response.uploadId,
+        status: 'starting',
+        uploadedBytes: 0,
+        totalBytes: 0,
+        completedFiles: 0,
+        totalFiles: 0,
+        currentFile: '',
+        currentFileUploaded: 0,
+        currentFileSize: 0,
+        speed: 0,
+        folderName: request.folderName
+      });
+    } catch (err: any) {
+      setToast({ message: `Failed to start folder upload: ${err.message || 'Unknown error'}`, type: 'error' });
+      setActiveUpload(null);
+    }
+  }, [setToast]);
+
+  const submitCreateFolder = async () => {
+    const sanitized = newFolderName.trim().replace(/[/\\]+/g, '');
+    if (!sanitized) {
+      setToast({ message: 'Folder name cannot be empty', type: 'error' });
+      return;
+    }
+    setIsCreateFolderModalOpen(false);
+    setNewFolderName('');
+    const electron = (window as any).electronAPI;
+    if (!electron) return;
+    const targetPath = buildRemotePath(sanitized);
+    setLoading(true);
+    try {
+      const result = await electron.createDirectory(targetPath);
+      setLoading(false);
+      if (result.success) {
+        setToast({ message: `Folder "${sanitized}" created`, type: 'success' });
+        handleNavigate(currentPath);
+      } else {
+        setToast({ message: `Failed to create folder: ${result.error || 'Unknown error'}`, type: 'error' });
+      }
+    } catch (err: any) {
+      setLoading(false);
+      setToast({ message: `Failed to create folder: ${err.message || 'Unknown error'}`, type: 'error' });
+    }
+  };
+  const handleCreateFolder = () => {
+    setNewFolderName('');
+    setIsCreateFolderModalOpen(true);
+  };
+
+  const openDeleteDialog = async (file: RemoteFile) => {
+    const electron = (window as any).electronAPI;
+    if (file.type !== 'd') {
+      setDeleteDialog({
+        file,
+        requireRecursiveConfirm: false,
+        confirmChecked: true,
+        loading: false,
+        isDeleting: false
+      });
+      return;
+    }
+
+    setDeleteDialog({
+      file,
+      requireRecursiveConfirm: false,
+      confirmChecked: false,
+      loading: true,
+      isDeleting: false
+    });
+
+    if (!electron) {
+      setDeleteDialog({
+        file,
+        requireRecursiveConfirm: true,
+        confirmChecked: false,
+        loading: false,
+        isDeleting: false
+      });
+      return;
+    }
+
+    try {
+      const targetPath = buildRemotePath(file.name);
+      const result = await electron.listDir(targetPath);
+      const hasChildren = !(result.success && result.files.length === 0);
+      setDeleteDialog({
+        file,
+        requireRecursiveConfirm: hasChildren,
+        confirmChecked: !hasChildren,
+        loading: false,
+        isDeleting: false
+      });
+    } catch {
+      setDeleteDialog({
+        file,
+        requireRecursiveConfirm: true,
+        confirmChecked: false,
+        loading: false,
+        isDeleting: false
+      });
+    }
+  };
+
+  const closeDeleteDialog = () => {
+    setDeleteDialog(deleteDialogInitialState);
+  };
+
+  const executeDelete = async () => {
+    if (!deleteDialog.file) return;
+    const electron = (window as any).electronAPI;
+    if (!electron) return;
+    const targetPath = buildRemotePath(deleteDialog.file.name);
+    setDeleteDialog((prev) => ({ ...prev, isDeleting: true }));
+    try {
+      const result = await electron.deleteEntry(targetPath, deleteDialog.file.type === 'd');
+      setDeleteDialog(deleteDialogInitialState);
+      if (result.success) {
+        setToast({ message: `"${deleteDialog.file.name}" deleted`, type: 'success' });
+        handleNavigate(currentPath);
+      } else {
+        setToast({ message: `Failed to delete: ${result.error || 'Unknown error'}`, type: 'error' });
+      }
+    } catch (err: any) {
+      setToast({ message: `Failed to delete: ${err.message || 'Unknown error'}`, type: 'error' });
+      setDeleteDialog(deleteDialogInitialState);
+    }
+  };
+
+  const handleDeleteSelected = async () => {
+    if (!selectedFile) {
+      setToast({ message: 'Select a file or folder first', type: 'info' });
+      return;
+    }
+    const file = remoteFiles.find(f => f.name === selectedFile);
+    if (!file) return;
+    openDeleteDialog(file);
+  };
+
+  const handlePauseUpload = async () => {
+    if (!activeUpload || UPLOAD_FINAL_STATUSES.includes(activeUpload.status) || activeUpload.status === 'paused') return;
+    const electron = (window as any).electronAPI;
+    if (!electron) return;
+    await electron.pauseUpload(activeUpload.id);
+  };
+
+  const handleResumeUpload = async () => {
+    if (!activeUpload || UPLOAD_FINAL_STATUSES.includes(activeUpload.status) || activeUpload.status !== 'paused') return;
+    const electron = (window as any).electronAPI;
+    if (!electron) return;
+    await electron.resumeUpload(activeUpload.id);
+  };
+
+  const handleCancelUpload = async () => {
+    if (!activeUpload || UPLOAD_FINAL_STATUSES.includes(activeUpload.status)) return;
+    setActiveUpload((prev) => (prev ? { ...prev, cancelRequested: true } : prev));
+    setToast({ message: 'Cancelling upload…', type: 'warning' });
+    const electron = (window as any).electronAPI;
+    if (!electron) return;
+    await electron.cancelUpload(activeUpload.id);
+  };
+
+  const handleUp = () => {
+    if (currentPath === '/') return;
+    const parts = currentPath.split('/').filter(Boolean);
+    parts.pop();
+    const newPath = '/' + parts.join('/');
+    handleNavigate(newPath);
   };
 
   // Search functionality for text preview
@@ -268,6 +473,63 @@ const FileExplorer = () => {
   useEffect(() => {
     handleSearch(searchText);
   }, [searchText, handleSearch]);
+
+  useEffect(() => {
+    if (folderUploadQueue.length === 0) return;
+    if (activeUpload && !UPLOAD_FINAL_STATUSES.includes(activeUpload.status)) return;
+    const [next, ...rest] = folderUploadQueue;
+    if (!next) return;
+    setFolderUploadQueue(rest);
+    initiateFolderUpload(next);
+  }, [folderUploadQueue, activeUpload, initiateFolderUpload]);
+
+  useEffect(() => {
+    const electron = (window as any).electronAPI;
+    if (!electron?.onUploadProgress) return;
+    const unsubscribe = electron.onUploadProgress((payload: any) => {
+      setActiveUpload((prev) => {
+        if (!prev || prev.id !== payload.uploadId) {
+          return prev;
+        }
+        const next: UploadTaskState = {
+          ...prev,
+          status: payload.status as UploadStatus,
+          uploadedBytes: typeof payload.uploadedBytes === 'number' ? payload.uploadedBytes : prev.uploadedBytes,
+          totalBytes: typeof payload.totalBytes === 'number' ? payload.totalBytes : prev.totalBytes,
+          completedFiles: typeof payload.completedFiles === 'number' ? payload.completedFiles : prev.completedFiles,
+          totalFiles: typeof payload.totalFiles === 'number' ? payload.totalFiles : prev.totalFiles,
+          currentFile: payload.currentFile ?? prev.currentFile,
+          currentFileSize: typeof payload.currentFileSize === 'number' ? payload.currentFileSize : prev.currentFileSize,
+          currentFileUploaded: typeof payload.currentFileUploaded === 'number' ? payload.currentFileUploaded : prev.currentFileUploaded,
+          speed: typeof payload.speed === 'number' ? payload.speed : prev.speed,
+          cancelRequested: prev.cancelRequested
+        };
+
+        if (['completed', 'failed', 'cancelled'].includes(payload.status)) {
+          const status = payload.status as UploadStatus;
+          if (status === 'completed') {
+            setToast({ message: 'Folder upload completed', type: 'success' });
+          } else if (status === 'failed') {
+            setToast({ message: `Folder upload failed: ${payload.error || 'Unknown error'}`, type: 'error' });
+          } else {
+            setToast({ message: 'Folder upload cancelled', type: 'warning' });
+          }
+          handleNavigate(currentPath);
+          setTimeout(() => {
+            setActiveUpload(null);
+          }, 2000);
+        }
+
+        return next;
+      });
+    });
+
+    return () => {
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
+  }, [handleNavigate, currentPath, setToast]);
 
   const scrollToMatch = useCallback((index: number) => {
     if (index < 0 || index >= searchMatches.length || !previewContent || !searchText) return;
@@ -396,8 +658,8 @@ const FileExplorer = () => {
       // get suggestions from that directory using API
       if (startsWithSlash || endsWithSlash || parts.length > 1) {
         // Use dedicated suggestion API (non-blocking)
-        const electron = (window as any).electronAPI;
-        if (electron) {
+    const electron = (window as any).electronAPI;
+    if (electron) {
           // Fetch suggestions asynchronously without blocking UI
           electron.getPathSuggestions(inputPath).then((result: any) => {
             if (result.success && result.suggestions) {
@@ -510,21 +772,93 @@ const FileExplorer = () => {
 
     addDownload(downloadItem);
     
-    // Start download (this will show save dialog in backend)
-    setLoading(true);
+    // Get default download path from current site
+    const defaultDownloadPath = currentSite?.defaultDownloadPath;
+    const actionToUse = applyToAll ? duplicateAction : null;
+    
+    // Start download (this will show save dialog in backend if no default path, or handle duplicates)
+    let downloadPromise: Promise<any>;
     try {
-      const result = await electron.download(remotePath, file.name);
-      setLoading(false);
+      downloadPromise = electron.download(
+        remotePath, 
+        file.name, 
+        downloadId, 
+        file.size || 0,
+        defaultDownloadPath,
+        actionToUse || undefined,
+        applyToAll
+      );
+    } catch (err: any) {
+      updateDownload(downloadId, {
+        status: 'failed',
+        error: err.message || 'Unknown error',
+        endTime: Date.now()
+      });
+      setToast({ message: `Download error: ${err.message || 'Unknown error'}`, type: 'error' });
+      return;
+    }
+
+    // Mark as in progress while queued/executing
+    // Note: We'll update the file name after the download path is determined
+    updateDownload(downloadId, { status: 'downloading' });
+
+    downloadPromise.then((result: any) => {
+      console.log('[FileExplorer] Download promise resolved:', { 
+        downloadId, 
+        savedPath: result?.savedPath, 
+        actualFileName: result?.actualFileName,
+        cancelled: result?.cancelled,
+        success: result?.success 
+      });
       
-      if (result && (result.cancelled === true || result.canceled === true)) {
+      if (result?.dialogCancelled) {
         removeDownload(downloadId);
         return;
       }
+
+      if (result?.skipped) {
+        removeDownload(downloadId);
+        setToast({ message: `Download skipped: ${file.name}`, type: 'info' });
+        return;
+      }
+
+      // Always update file name and local path first (for all cases: success, cancelled, failed)
+      const actualFileName = result?.actualFileName || file.name;
+      const localPath = result?.savedPath || '';
       
-      if (result && result.success) {
-        // Update download item with saved path and mark as completed
+      console.log('[FileExplorer] Updating download with:', { downloadId, actualFileName, localPath });
+      
+      if (actualFileName !== file.name || localPath) {
         updateDownload(downloadId, {
-          localPath: result.savedPath || '',
+          fileName: actualFileName,
+          localPath: localPath
+        }, { persist: true });
+      }
+
+      if (result?.cancelled) {
+        // Status will be set by backend notification, just ensure we have the path
+        updateDownload(downloadId, {
+          fileName: actualFileName,
+          localPath: localPath,
+          status: 'cancelled',
+          downloadedSize: 0,
+          speed: undefined,
+          eta: undefined,
+          endTime: Date.now()
+        });
+        // Toast will be shown from App.tsx when status changes
+        return;
+      }
+
+      if (result && result.success) {
+        // Update duplicate action preferences if user chose "apply to all"
+        if (result.applyToAll && result.duplicateAction) {
+          setDuplicateAction(result.duplicateAction);
+          setApplyToAll(true);
+        }
+
+        // localPath should already be set from earlier update
+        updateDownload(downloadId, {
           status: 'completed',
           downloadedSize: file.size || 0,
           endTime: Date.now()
@@ -538,32 +872,19 @@ const FileExplorer = () => {
         });
         setToast({ message: `Download failed: ${result?.error || 'Unknown error'}`, type: 'error' });
       }
-    } catch (err: any) {
-      setLoading(false);
+    }).catch((err: any) => {
       updateDownload(downloadId, {
         status: 'failed',
         error: err.message || 'Unknown error',
         endTime: Date.now()
       });
       setToast({ message: `Download error: ${err.message || 'Unknown error'}`, type: 'error' });
-    }
+    });
   };
 
-  const handleQuickView = async (file: RemoteFile, e: React.MouseEvent) => {
+  const handleQuickView = (file: RemoteFile, e: React.MouseEvent) => {
     e.stopPropagation();
-    const electron = (window as any).electronAPI;
-    if (electron) {
-        const remotePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
-        setLoading(true);
-        const result = await electron.quickView(remotePath);
-        setLoading(false);
-        if (result.success) {
-            setPreviewFile(file.name);
-            setPreviewContent(result.data);
-        } else {
-            alert('Preview failed: ' + result.error);
-        }
-    }
+    previewFileHandler(file);
   };
 
   // Drag and Drop Handlers
@@ -582,14 +903,66 @@ const FileExplorer = () => {
     const electron = (window as any).electronAPI;
     if (!electron) return;
 
-    // In Electron, e.dataTransfer.files has a 'path' property!
     const files = Array.from(e.dataTransfer.files);
-    
+    const filePayloads = await Promise.all(files.map(async (file) => {
+      let localPath = (file as any).path as string | undefined;
+      if ((!localPath || localPath.length === 0) && electron?.getPathForFile) {
+        try {
+          localPath = await electron.getPathForFile(file);
+        } catch (err) {
+          console.error('getPathForFile failed for', file.name, err);
+        }
+      }
+
+      let isDirectory = false;
+      if (localPath && electron.getPathInfo) {
+        const info = await electron.getPathInfo(localPath);
+        if (info?.success) {
+          isDirectory = info.isDirectory;
+        }
+      }
+
+      const payload = {
+        fileName: file.name,
+        type: file.type,
+        size: file.size,
+        lastModified: file.lastModified,
+        localPath,
+        isDirectory
+      };
+      console.log('[Upload] Drag file payload:', payload);
+      return payload;
+    }));
+
+    const directories = filePayloads.filter(p => p.isDirectory && p.localPath);
+    const regularFiles = filePayloads.filter(p => !p.isDirectory && p.localPath);
+    const missingPathEntries = filePayloads.filter(p => !p.localPath);
+
+    missingPathEntries.forEach((entry) => {
+      setToast({ message: `Cannot upload ${entry.fileName}: source path unavailable`, type: 'error' });
+    });
+
+    if (directories.length > 0) {
+      directories.forEach((dir) => {
+        enqueueFolderUpload({
+          folderName: dir.fileName,
+          localPath: dir.localPath as string,
+          remotePath: buildRemotePath(dir.fileName)
+        });
+      });
+      setToast({
+        message: `Queued ${directories.length} folder upload${directories.length > 1 ? 's' : ''}`,
+        type: 'info'
+      });
+    }
+
+    if (regularFiles.length > 0) {
     setLoading(true);
-    for (const file of files) {
-        const localPath = (file as any).path; // Electron specific
-        const fileName = file.name;
-        const remotePath = currentPath === '/' ? `/${fileName}` : `${currentPath}/${fileName}`;
+      try {
+        for (const file of regularFiles) {
+          const localPath = file.localPath as string;
+          const fileName = file.fileName;
+          const remotePath = buildRemotePath(fileName);
         
         console.log('Uploading', localPath, 'to', remotePath);
         
@@ -597,10 +970,13 @@ const FileExplorer = () => {
         if (!result.success) {
             alert(`Failed to upload ${fileName}: ${result.error}`);
         }
+        }
+      } finally {
+        setLoading(false);
     }
     
-    // Refresh
-    handleNavigate(currentPath);
+      await handleNavigate(currentPath);
+    }
   };
 
   const openProperties = (file: RemoteFile, e: React.MouseEvent) => {
@@ -731,12 +1107,12 @@ const FileExplorer = () => {
                             className="p-2 hover:bg-accent rounded-lg transition-colors relative group"
                             title="Close preview"
                         >
-                            <X size={20} />
+                        <X size={20} />
                             <span className="absolute bottom-full right-0 mb-2 px-2 py-1 bg-popover text-popover-foreground text-xs rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
                                 Close preview
                             </span>
-                        </button>
-                    </div>
+                    </button>
+                </div>
                 </div>
                 
                 {/* Search bar for text files */}
@@ -824,6 +1200,223 @@ const FileExplorer = () => {
                     )}
                 </pre>
             </div>
+        )}
+        {isCreateFolderModalOpen && (
+          <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center">
+            <div className="bg-card border border-border rounded-lg shadow-lg w-[320px] max-w-full p-4 space-y-4">
+              <div>
+                <h2 className="text-lg font-semibold mb-1">Create New Folder</h2>
+                <p className="text-xs text-muted-foreground">
+                  Enter a name for the new folder in {currentPath}
+                </p>
+              </div>
+              <input
+                type="text"
+                value={newFolderName}
+                onChange={(e) => setNewFolderName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') submitCreateFolder();
+                  if (e.key === 'Escape') setIsCreateFolderModalOpen(false);
+                }}
+                className="w-full px-3 py-2 bg-input border border-border rounded focus:outline-none focus:ring-2 focus:ring-primary text-sm"
+                placeholder="Folder name"
+                autoFocus
+              />
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setIsCreateFolderModalOpen(false)}
+                  className="px-3 py-1.5 text-sm hover:bg-accent rounded"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={submitCreateFolder}
+                  className="px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded disabled:opacity-50"
+                  disabled={newFolderName.trim().length === 0}
+                >
+                  Create
+                </button>
+              </div>
+            </div>
+            </div>
+        )}
+        {deleteDialog.file && (
+          <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center">
+            <div className="bg-card border border-border rounded-lg shadow-lg w-[360px] max-w-full p-5 space-y-4">
+              <div>
+                <h2 className="text-lg font-semibold mb-1">Delete {deleteDialog.file.type === 'd' ? 'Folder' : 'File'}</h2>
+                <p className="text-sm text-muted-foreground">
+                  Are you sure you want to delete "{deleteDialog.file.name}"?
+                </p>
+                {deleteDialog.file.type === 'd' && (
+                  <div className="mt-2 space-y-2">
+                    {deleteDialog.loading ? (
+                      <p className="text-xs text-muted-foreground">Checking folder contents...</p>
+                    ) : (
+                      <>
+                        <p className="text-xs text-red-500">
+                          This action cannot be undone. Any files and subfolders will be permanently removed.
+                        </p>
+                        {deleteDialog.requireRecursiveConfirm && (
+                          <label className="flex items-start gap-2 text-xs text-red-500">
+                            <input
+                              type="checkbox"
+                              checked={deleteDialog.confirmChecked}
+                              onChange={(e) =>
+                                setDeleteDialog((prev) => ({ ...prev, confirmChecked: e.target.checked }))
+                              }
+                            />
+                            <span>I understand that all files and subfolders will be deleted.</span>
+                          </label>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={closeDeleteDialog}
+                  className="px-3 py-1.5 text-sm hover:bg-accent rounded disabled:opacity-50"
+                  disabled={deleteDialog.isDeleting}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={executeDelete}
+                  disabled={
+                    deleteDialog.isDeleting ||
+                    (deleteDialog.file.type === 'd' &&
+                      deleteDialog.requireRecursiveConfirm &&
+                      !deleteDialog.confirmChecked)
+                  }
+                  className="px-3 py-1.5 text-sm rounded bg-red-600 text-white disabled:opacity-50"
+                >
+                  {deleteDialog.isDeleting ? 'Deleting...' : 'Delete'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {activeUpload && (
+          <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center">
+            <div className="bg-card border border-border rounded-lg shadow-lg w-[420px] max-w-full p-5 space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-semibold">Uploading {activeUpload.folderName || 'folder'}</h2>
+                  <p className="text-xs text-muted-foreground">
+                    {activeUpload.status === 'paused'
+                      ? 'Upload paused'
+                      : UPLOAD_FINAL_STATUSES.includes(activeUpload.status)
+                        ? `Upload ${activeUpload.status}`
+                        : 'Uploading contents recursively'}
+                  </p>
+                </div>
+                {UPLOAD_FINAL_STATUSES.includes(activeUpload.status) && (
+                  <button
+                    onClick={() => setActiveUpload(null)}
+                    className="p-1.5 hover:bg-accent rounded"
+                    title="Close"
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+
+                <div className="space-y-3 text-sm">
+                  {activeUpload.cancelRequested && !UPLOAD_FINAL_STATUSES.includes(activeUpload.status) && (
+                    <div className="p-2 rounded bg-amber-100 text-amber-700 text-xs flex items-center gap-2 animate-pulse">
+                      <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
+                      <span>Cancelling upload… this may take a few seconds.</span>
+                    </div>
+                  )}
+                <div>
+                  <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                    <span>
+                      {formatBytes(activeUpload.uploadedBytes)} / {formatBytes(activeUpload.totalBytes || 0)}
+                    </span>
+                    <span>
+                      {activeUpload.totalBytes
+                        ? `${Math.min(100, Math.round((activeUpload.uploadedBytes / activeUpload.totalBytes) * 100))}%`
+                        : '0%'}
+                    </span>
+                  </div>
+                  <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-primary transition-all duration-200"
+                      style={{
+                        width: activeUpload.totalBytes
+                          ? `${Math.min(100, (activeUpload.uploadedBytes / activeUpload.totalBytes) * 100)}%`
+                          : '0%'
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <p className="text-xs text-muted-foreground mb-1">
+                    Current file: {activeUpload.currentFile || 'Preparing...'}
+                  </p>
+                  {activeUpload.currentFileSize ? (
+                    <>
+                      <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                        <span>
+                          {formatBytes(activeUpload.currentFileUploaded || 0)} / {formatBytes(activeUpload.currentFileSize)}
+                        </span>
+                        <span>
+                          {Math.min(
+                            100,
+                            Math.round(((activeUpload.currentFileUploaded || 0) / activeUpload.currentFileSize) * 100)
+                          )}%
+                        </span>
+                      </div>
+                      <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-primary/70 transition-all duration-200"
+                          style={{
+                            width: `${Math.min(
+                              100,
+                              ((activeUpload.currentFileUploaded || 0) / activeUpload.currentFileSize) * 100
+                            )}%`
+                          }}
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                      <div className="h-full bg-muted-foreground/30 animate-pulse" style={{ width: '25%' }} />
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+                  <span>
+                    Files: {activeUpload.completedFiles}/{activeUpload.totalFiles}
+                  </span>
+                  <span>Speed: {activeUpload.speed ? `${formatBytes(activeUpload.speed)}/s` : '--'}</span>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={
+                    activeUpload.status === 'paused' ? handleResumeUpload : handlePauseUpload
+                  }
+                  disabled={UPLOAD_FINAL_STATUSES.includes(activeUpload.status) || activeUpload.cancelRequested}
+                  className="px-3 py-1.5 text-sm rounded bg-secondary hover:bg-secondary/80 disabled:opacity-50"
+                >
+                  {activeUpload.status === 'paused' ? 'Resume' : 'Pause'}
+                </button>
+                <button
+                  onClick={handleCancelUpload}
+                  disabled={UPLOAD_FINAL_STATUSES.includes(activeUpload.status) || activeUpload.cancelRequested}
+                  className="px-3 py-1.5 text-sm rounded bg-red-600 text-white disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* Preview Modal for Images */}
@@ -1115,12 +1708,27 @@ const FileExplorer = () => {
                         className="px-3 py-1.5 bg-input rounded text-sm font-mono cursor-text hover:bg-input/80 transition-colors"
                         title="Click to edit path"
                     >
-                        {currentPath}
+                {currentPath}
                     </div>
                 )}
             </div>
             <button onClick={() => handleNavigate(currentPath)} className="p-1.5 hover:bg-accent rounded">
                 <RefreshCw size={16} className={isLoading ? 'animate-spin' : ''} />
+            </button>
+            <button
+              onClick={handleCreateFolder}
+              className="p-1.5 hover:bg-accent rounded"
+              title="New folder"
+            >
+              <FolderPlus size={16} />
+            </button>
+            <button
+              onClick={handleDeleteSelected}
+              disabled={!selectedFile}
+              className="p-1.5 hover:bg-accent rounded disabled:opacity-50"
+              title={selectedFile ? `Delete ${selectedFile}` : 'Select an item to delete'}
+            >
+              <Trash2 size={16} />
             </button>
         </div>
 
@@ -1178,6 +1786,16 @@ const FileExplorer = () => {
                                 </button>
                             </>
                         )}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openDeleteDialog(file);
+                          }}
+                          className="p-1 hover:text-red-500"
+                          title={`Delete ${file.type === 'd' ? 'folder' : 'file'}`}
+                        >
+                          <Trash2 size={14} />
+                        </button>
                     </div>
                 </div>
             ))}

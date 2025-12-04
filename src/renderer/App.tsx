@@ -3,9 +3,20 @@ import Sidebar from './components/Sidebar';
 import FileExplorer from './components/FileExplorer';
 import TitleBar from './components/TitleBar';
 import DownloadManager from './components/DownloadManager';
-import DownloadProgressDialog from './components/DownloadProgressDialog';
+import DownloadProgressDialog, { DownloadItem } from './components/DownloadProgressDialog';
 import ResizablePanel from './components/ResizablePanel';
+import Toast from './components/Toast';
 import { useStore } from './store';
+
+type DownloadProgressPayload = {
+  id: string;
+  status?: 'queued' | 'downloading' | 'cancelled' | 'failed' | 'completed';
+  downloadedSize?: number;
+  totalSize?: number;
+  speed?: number;
+  eta?: number;
+  startTime?: number;
+};
 
 function App() {
   const loadSites = useStore((state) => state.loadSites);
@@ -14,8 +25,6 @@ function App() {
   const updateDownload = useStore((state) => state.updateDownload);
   const removeDownload = useStore((state) => state.removeDownload);
   const clearHistory = useStore((state) => state.clearHistory);
-  const pauseDownload = useStore((state) => state.pauseDownload);
-  const resumeDownload = useStore((state) => state.resumeDownload);
   const cancelDownload = useStore((state) => state.cancelDownload);
   
   const showDownloadManager = useStore((state) => state.showDownloadManager);
@@ -25,6 +34,10 @@ function App() {
   
   const [selectedDownloadId, setSelectedDownloadId] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [cancellingDownloads, setCancellingDownloads] = useState<Set<string>>(new Set());
+  const cancellingDownloadsRef = React.useRef<Set<string>>(new Set());
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' | 'warning' } | null>(null);
+  const processedCancellations = React.useRef<Set<string>>(new Set());
   
   // Panel widths - use store for sidebar width so FileExplorer can access it
   const sidebarWidth = useStore((state) => state.sidebarWidth);
@@ -49,12 +62,124 @@ function App() {
     }
   }, [loadSites, loadDownloads, setTheme]);
 
+  useEffect(() => {
+    const electron = (window as any).electronAPI;
+    if (!electron?.onDownloadProgress) {
+      return;
+    }
+
+    const unsubscribe = electron.onDownloadProgress((payload: DownloadProgressPayload) => {
+      if (!payload?.id) return;
+
+      // Check if this download is already in a final state (cancelled/failed)
+      const currentDownload = downloads.find(d => d.id === payload.id);
+      if (currentDownload && (currentDownload.status === 'cancelled' || currentDownload.status === 'failed')) {
+        console.log('[App] Ignoring update for already finished download:', payload.id, 'current status:', currentDownload.status, 'payload status:', payload.status);
+        return;
+      }
+
+      // Check if this download is being cancelled - use ref for immediate access
+      if (cancellingDownloadsRef.current.has(payload.id)) {
+        console.log('[App] Blocking update for cancelling download, status:', payload.status);
+        // Only allow final status updates to 'cancelled' or 'failed'
+        if (payload.status === 'cancelled' || payload.status === 'failed') {
+          console.log('[App] Allowing final status update:', payload.status);
+          updateDownload(payload.id, { 
+            status: payload.status, 
+            downloadedSize: 0,
+            speed: undefined,
+            eta: undefined,
+            endTime: Date.now() 
+          }, { persist: true });
+        }
+        // Block ALL other updates while cancelling (including localPath, fileName, etc.)
+        return;
+      }
+
+      const updates: Partial<DownloadItem> = {
+        downloadedSize: payload.downloadedSize ?? 0,
+        speed: payload.speed,
+        eta: payload.eta
+      };
+
+      if (payload.status) {
+        updates.status = payload.status;
+      }
+      if (typeof payload.totalSize === 'number' && payload.totalSize > 0) {
+        updates.totalSize = payload.totalSize;
+      }
+      if (payload.startTime) {
+        updates.startTime = payload.startTime;
+      }
+      if ((payload as any).actualFileName) {
+        updates.fileName = (payload as any).actualFileName;
+      }
+      if ((payload as any).localPath) {
+        updates.localPath = (payload as any).localPath;
+      }
+
+      updateDownload(payload.id, updates, { persist: false });
+    });
+
+    return () => {
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
+  }, [updateDownload]);
+
   const activeDownload = downloads.find(d => 
-    d.status === 'downloading' || d.status === 'paused' || d.status === 'queued'
+    d.status === 'downloading' || d.status === 'queued'
   );
   const selectedDownload = selectedDownloadId 
     ? downloads.find(d => d.id === selectedDownloadId)
     : null;
+
+  // Track when downloads move to cancelled/failed state
+  React.useEffect(() => {
+    downloads.forEach(download => {
+      // Check if this download just completed cancellation and we haven't processed it yet
+      if ((download.status === 'cancelled' || download.status === 'failed') && 
+          cancellingDownloadsRef.current.has(download.id) && 
+          !processedCancellations.current.has(download.id)) {
+        
+        // Mark as processed to prevent duplicate handling
+        processedCancellations.current.add(download.id);
+        
+        // Show toast notification (only once per cancellation)
+        if (download.status === 'cancelled') {
+          setToast({ message: `Download cancelled: ${download.fileName}`, type: 'warning' });
+        } else if (download.status === 'failed') {
+          setToast({ message: `Download failed: ${download.fileName}`, type: 'error' });
+        }
+        
+        // Auto-dismiss dialog if this download is selected
+        if (selectedDownloadId === download.id) {
+          console.log('[App] Scheduling auto-dismiss for download:', download.id);
+          const timer = setTimeout(() => {
+            console.log('[App] Auto-dismissing dialog now');
+            setSelectedDownloadId(null);
+          }, 2000);
+          // Store timer ref to prevent duplicate dismissals
+          return () => clearTimeout(timer);
+        }
+        
+        // Clean up cancelling state
+        setTimeout(() => {
+          cancellingDownloadsRef.current.delete(download.id);
+          setCancellingDownloads(prev => {
+            const next = new Set(prev);
+            next.delete(download.id);
+            return next;
+          });
+          // Clean up processed tracking after a delay
+          setTimeout(() => {
+            processedCancellations.current.delete(download.id);
+          }, 5000);
+        }, 2500);
+      }
+    });
+  }, [downloads, selectedDownloadId]);
 
   const handleShowDetails = (id: string) => {
     setSelectedDownloadId(id);
@@ -97,14 +222,29 @@ function App() {
           >
             <DownloadManager
               downloads={downloads}
-              onPause={pauseDownload}
-              onResume={resumeDownload}
-              onCancel={cancelDownload}
+              onCancel={(id) => {
+                // Track that this download is being cancelled (use both state and ref)
+                cancellingDownloadsRef.current.add(id);
+                setCancellingDownloads(prev => new Set(prev).add(id));
+                // Update download to show cancelling state immediately (keep localPath, only clear progress data)
+                updateDownload(id, {
+                  downloadedSize: 0,
+                  speed: undefined,
+                  eta: undefined
+                  // DO NOT clear localPath - it should remain for the cancelled record
+                }, { persist: false });
+                // Call backend to cancel - don't update status yet, wait for backend confirmation
+                const electron = (window as any).electronAPI;
+                if (electron?.cancelDownload) {
+                  electron.cancelDownload(id);
+                }
+              }}
               onRemove={removeDownload}
               onClearHistory={clearHistory}
               onShowDetails={handleShowDetails}
               showHistory={showHistory}
               onToggleHistory={() => setShowHistory(!showHistory)}
+              cancellingDownloads={cancellingDownloads}
             />
           </ResizablePanel>
         )}
@@ -114,14 +254,29 @@ function App() {
       {selectedDownload && (
         <DownloadProgressDialog
           download={selectedDownload}
-          onCancel={() => cancelDownload(selectedDownload.id)}
-          onPause={() => pauseDownload(selectedDownload.id)}
-          onResume={() => resumeDownload(selectedDownload.id)}
+          onCancel={() => {
+            // Track that this download is being cancelled (use both state and ref)
+            cancellingDownloadsRef.current.add(selectedDownload.id);
+            setCancellingDownloads(prev => new Set(prev).add(selectedDownload.id));
+            // Update download to show cancelling state immediately (keep localPath, only clear progress data)
+            updateDownload(selectedDownload.id, {
+              downloadedSize: 0,
+              speed: undefined,
+              eta: undefined
+              // DO NOT clear localPath - it should remain for the cancelled record
+            }, { persist: false });
+            // Call backend to cancel - don't update status yet, wait for backend confirmation
+            const electron = (window as any).electronAPI;
+            if (electron?.cancelDownload) {
+              electron.cancelDownload(selectedDownload.id);
+            }
+          }}
           onRemove={() => {
             removeDownload(selectedDownload.id);
             setSelectedDownloadId(null);
           }}
           showInBackground={handleMinimizeToBackground}
+          isCancelling={cancellingDownloads.has(selectedDownload.id)}
         />
       )}
       
@@ -133,9 +288,20 @@ function App() {
           title="Show downloads"
         >
           <span className="text-sm font-medium">
-            {downloads.filter(d => d.status === 'downloading' || d.status === 'queued' || d.status === 'paused').length}
+            {downloads.filter(d => d.status === 'downloading' || d.status === 'queued').length}
           </span>
         </button>
+      )}
+      
+      {/* Toast Notification */}
+      {toast && (
+        <Toast
+          message={toast.message}
+          type={toast.type}
+          onClose={() => setToast(null)}
+          showDownloadManager={showDownloadManager}
+          downloadManagerWidth={downloadManagerWidth}
+        />
       )}
     </div>
   );

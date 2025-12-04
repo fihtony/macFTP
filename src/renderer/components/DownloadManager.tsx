@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Download, Clock, CheckCircle2, XCircle, X, Play, Pause, Trash2, History } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Download, Clock, CheckCircle2, XCircle, X, Trash2, History } from 'lucide-react';
 import { DownloadItem } from './DownloadProgressDialog';
 import { formatBytes, formatRelativeTime, formatDate, formatTime } from '../utils';
 import ConfirmDialog from './ConfirmDialog';
@@ -7,26 +7,24 @@ import clsx from 'clsx';
 
 interface DownloadManagerProps {
   downloads: DownloadItem[];
-  onPause: (id: string) => void;
-  onResume: (id: string) => void;
   onCancel: (id: string) => void;
   onRemove: (id: string) => void;
   onClearHistory?: () => void;
   onShowDetails: (id: string) => void;
   showHistory?: boolean;
   onToggleHistory?: () => void;
+  cancellingDownloads?: Set<string>;
 }
 
 const DownloadManager: React.FC<DownloadManagerProps> = ({
   downloads,
-  onPause,
-  onResume,
   onCancel,
   onRemove,
   onClearHistory,
   onShowDetails,
   showHistory = false,
-  onToggleHistory
+  onToggleHistory,
+  cancellingDownloads = new Set()
 }) => {
   const [confirmDialog, setConfirmDialog] = useState<{
     type: 'clear' | 'delete';
@@ -34,7 +32,7 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
   } | null>(null);
 
   const activeDownloads = downloads.filter(d => 
-    d.status === 'queued' || d.status === 'downloading' || d.status === 'paused'
+    d.status === 'queued' || d.status === 'downloading'
   );
   // Sort history by endTime descending (most recent first)
   const historyDownloads = downloads
@@ -50,8 +48,6 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
         return <XCircle size={16} className="text-red-500" />;
       case 'downloading':
         return <Download size={16} className="text-primary animate-pulse" />;
-      case 'paused':
-        return <Pause size={16} className="text-yellow-500" />;
       case 'queued':
         return <Clock size={16} className="text-muted-foreground" />;
       default:
@@ -96,6 +92,24 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
                 <span className="text-xs font-medium truncate">
                   {download.fileName}
                 </span>
+                {download.status === 'completed' && (
+                  <span className="px-1.5 py-0.5 text-[9px] font-medium bg-green-500/20 text-green-500 rounded flex items-center gap-1 flex-shrink-0">
+                    <CheckCircle2 size={10} />
+                    Downloaded
+                  </span>
+                )}
+                {download.status === 'cancelled' && (
+                  <span className="px-1.5 py-0.5 text-[9px] font-medium bg-yellow-500/20 text-yellow-500 rounded flex items-center gap-1 flex-shrink-0">
+                    <X size={10} />
+                    Cancelled
+                  </span>
+                )}
+                {download.status === 'failed' && (
+                  <span className="px-1.5 py-0.5 text-[9px] font-medium bg-red-500/20 text-red-500 rounded flex items-center gap-1 flex-shrink-0">
+                    <XCircle size={10} />
+                    Failed
+                  </span>
+                )}
               </div>
               {/* Second line: Size, time, site */}
               <div className="flex items-center gap-2 flex-wrap">
@@ -130,7 +144,8 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
 
   const renderDownloadItem = (download: DownloadItem, showActions: boolean = true) => {
     const progress = getProgress(download);
-    const isActive = download.status === 'downloading' || download.status === 'paused' || download.status === 'queued';
+    const isActive = download.status === 'downloading' || download.status === 'queued';
+    const isCancelling = cancellingDownloads.has(download.id);
 
     return (
       <div
@@ -147,9 +162,14 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
               {getStatusIcon(download.status)}
             </div>
             <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center justify-between mb-1 gap-2">
                 <p className="text-sm font-medium truncate">{download.fileName}</p>
-                {isActive && (
+                {isCancelling && (
+                  <span className="px-1.5 py-0.5 text-[9px] font-medium bg-yellow-500/20 text-yellow-500 rounded flex-shrink-0">
+                    Cancelling
+                  </span>
+                )}
+                {isActive && !isCancelling && (
                   <span className="text-xs text-muted-foreground ml-2">
                     {progress.toFixed(0)}%
                   </span>
@@ -158,27 +178,62 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
               
               {isActive && (
                 <div className="mb-2">
-                  <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-primary transition-all duration-300"
-                      style={{ width: `${progress}%` }}
-                    />
+                  <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden relative">
+                    {isCancelling ? (
+                      <div 
+                        className="h-full bg-yellow-500 absolute"
+                        style={{
+                          animation: 'slide 1.5s ease-in-out infinite',
+                          width: '20%',
+                          left: '0%'
+                        }}
+                      />
+                    ) : (
+                      <div
+                        className="h-full bg-primary transition-all duration-300"
+                        style={{ width: `${progress}%` }}
+                      />
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground mt-1">
+                    <span>
+                      {isCancelling ? '-- / --' : `${formatBytes(download.downloadedSize || 0)} / ${formatBytes(download.totalSize || 0)}`}
+                    </span>
+                    {download.totalSize > 0 && !isCancelling && (
+                      <span>{progress.toFixed(1)}%</span>
+                    )}
+                    {isCancelling && (
+                      <span>--</span>
+                    )}
                   </div>
                 </div>
               )}
 
-              <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-                {download.status === 'downloading' && download.speed && (
-                  <span>{formatBytes(download.speed)}/s</span>
-                )}
-                {download.status === 'downloading' && download.eta && (
-                  <span>ETA: {formatTime(download.eta)}</span>
+              <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                {download.status === 'downloading' && (
+                  <>
+                    <div className="flex items-center gap-1">
+                      <span className="whitespace-nowrap">Speed:</span>
+                      <span className="font-medium min-w-[90px] inline-block">
+                        {isCancelling ? '--' : (download.speed ? `${formatBytes(download.speed)}/s` : '--')}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <span className="whitespace-nowrap">ETA:</span>
+                      <span className="font-medium min-w-[55px] inline-block">
+                        {isCancelling ? '--' : formatTime(download.eta)}
+                      </span>
+                    </div>
+                  </>
                 )}
                 {download.status === 'completed' && download.endTime && (
                   <span>{formatDate(download.endTime)}</span>
                 )}
                 {download.status === 'failed' && download.error && (
                   <span className="text-red-500 truncate max-w-xs">{download.error}</span>
+                )}
+                {download.status === 'cancelled' && (
+                  <span>Cancelled</span>
                 )}
               </div>
 
@@ -205,32 +260,19 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
 
           {showActions && (
             <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-              {download.status === 'downloading' && (
-                <button
-                  onClick={() => onPause(download.id)}
-                  className="p-1.5 hover:bg-accent rounded transition-colors"
-                  title="Pause"
-                >
-                  <Pause size={14} />
-                </button>
-              )}
-              {download.status === 'paused' && (
-                <button
-                  onClick={() => onResume(download.id)}
-                  className="p-1.5 hover:bg-accent rounded transition-colors"
-                  title="Resume"
-                >
-                  <Play size={14} />
-                </button>
-              )}
-              {(download.status === 'downloading' || download.status === 'paused' || download.status === 'queued') && (
+              {(download.status === 'downloading' || download.status === 'queued') && !isCancelling && (
                 <button
                   onClick={() => onCancel(download.id)}
-                  className="p-1.5 hover:bg-accent rounded transition-colors"
+                  className="p-1.5 rounded transition-colors hover:bg-accent"
                   title="Cancel"
                 >
                   <X size={14} />
                 </button>
+              )}
+              {isCancelling && (
+                <div className="p-1.5 opacity-30 cursor-not-allowed">
+                  <X size={14} />
+                </div>
               )}
               {!isActive && (
                 <button
@@ -330,7 +372,7 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
           message={
             confirmDialog.type === 'clear'
               ? 'Are you sure you want to clear all download history? This action cannot be undone.'
-              : 'Are you sure you want to delete this download record? This action cannot be undone.'
+              : 'Are you sure you want to delete this download record? The downloaded file will not be deleted.'
           }
           onConfirm={() => {
             if (confirmDialog.type === 'clear' && onClearHistory) {
