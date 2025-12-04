@@ -253,19 +253,80 @@ const cancelDownloadJob = (id: string, reason: DownloadStatus = 'cancelled', loc
 };
 
 const cancelAllDownloads = (reason: DownloadStatus = 'cancelled') => {
+  console.log('[Download] Cancelling all downloads, reason:', reason, {
+    queueLength: downloadQueue.length,
+    activeFileControllers: activeDownloadControllers.size,
+    activeFolderControllers: downloadFolderControllers.size,
+    activeJobs: activeDownloadJobs
+  });
+  
+  // Count jobs to decrement
+  let jobsToDecrement = 0;
+  
+  // Cancel all downloads in queue (both file and folder)
   while (downloadQueue.length > 0) {
     const job = downloadQueue.shift();
     if (job) {
+      // Check if this job has already started (incremented activeDownloadJobs)
+      // Jobs in queue but already being processed have incremented the counter
+      if ((job as any).isFolder) {
+        // Folder job in queue that was being processed
+        if (activeFolderJobs.has(job.id)) {
+          jobsToDecrement++;
+        }
+      }
+      
       job.reject(createDownloadAbortError(reason));
       notifyDownloadProgress({
         id: job.id,
         downloadedSize: 0,
         totalSize: job.totalSize,
-        status: reason
+        status: reason,
+        endTime: Date.now()
       });
     }
   }
+  
+  // Cancel all active file downloads
   activeDownloadControllers.forEach(controller => controller(reason));
+  
+  // Cancel all active folder downloads
+  const folderDownloadCount = downloadFolderControllers.size;
+  downloadFolderControllers.forEach((controller, downloadId) => {
+    console.log('[Download] Cancelling folder download:', downloadId, 'reason:', reason);
+    controller.cancelRequested = true;
+    
+    // Notify cancellation
+    notifyDownloadProgress({
+      id: downloadId,
+      downloadedSize: 0,
+      totalSize: 0,
+      status: reason,
+      speed: 0,
+      eta: 0,
+      endTime: Date.now()
+    });
+  });
+  
+  // Clear folder controllers - they won't complete naturally
+  downloadFolderControllers.clear();
+  
+  // Decrement activeDownloadJobs for folder jobs that were waiting
+  if (jobsToDecrement > 0) {
+    console.log('[Download] Decrementing activeDownloadJobs by:', jobsToDecrement);
+    activeDownloadJobs = Math.max(0, activeDownloadJobs - jobsToDecrement);
+  }
+  
+  // Manually decrement for each active folder download since their finally blocks won't run
+  if (folderDownloadCount > 0) {
+    console.log('[Download] Decrementing activeDownloadJobs for cancelled folder downloads:', folderDownloadCount);
+    activeDownloadJobs = Math.max(0, activeDownloadJobs - folderDownloadCount);
+  }
+  
+  // Clear all tracking maps
+  activeFolderJobs.clear();
+  
+  console.log('[Download] All downloads cancelled, final activeDownloadJobs:', activeDownloadJobs);
 };
 
 const removeFtpDirectoryRecursive = async (client: ftp.Client, dirPath: string) => {
@@ -979,14 +1040,6 @@ const processDownloadQueue = () => {
           if (!activeFolderJobs.has(job.id)) {
             console.log('[Download Queue] Job was cancelled while waiting for dialog:', job.id);
             throw new Error('Cancelled while queued');
-          }
-          
-          if (attempts % 10 === 0) {
-            console.log('[Download Queue] Still waiting for dialog... attempt:', attempts, 'job:', {
-              id: job.id,
-              hasLocalPath: !!job.localPath,
-              hasFolderName: !!job.folderName
-            });
           }
         }
         
@@ -1727,12 +1780,9 @@ ipcMain.handle('ftp:download-folder', async (event, { remotePath, folderName, do
                 // If we have a duplicate action preference and applyToAll, use it
                 if (finalDuplicateAction && finalApplyToAll) {
                     if (finalDuplicateAction === 'skip') {
-                        // Remove from queue
-                        const jobIndex = downloadQueue.findIndex((j: any) => j.id === downloadId);
-                        if (jobIndex !== -1) {
-                            const job = downloadQueue.splice(jobIndex, 1)[0] as any;
-                            if (job.pendingDialogReject) job.pendingDialogReject(new Error('Skipped'));
-                        }
+                        // Remove from activeFolderJobs to stop the wait loop
+                        activeFolderJobs.delete(downloadId);
+                        console.log('[Folder Download] Auto-skip (applyToAll), removed from activeFolderJobs:', downloadId);
                         return { success: false, cancelled: true, dialogCancelled: false, skipped: true };
                     } else if (finalDuplicateAction === 'overwrite') {
                         savedFolderPath = defaultPath;
@@ -1753,22 +1803,16 @@ ipcMain.handle('ftp:download-folder', async (event, { remotePath, folderName, do
                     });
                     
                     if (result.response === 3) { // Cancel
-                        // Remove from queue and reject
-                        const jobIndex = downloadQueue.findIndex((j: any) => j.id === downloadId);
-                        if (jobIndex !== -1) {
-                            const job = downloadQueue.splice(jobIndex, 1)[0] as any;
-                            if (job.pendingDialogReject) job.pendingDialogReject(new Error('User cancelled'));
-                        }
+                        // Remove from activeFolderJobs to stop the wait loop
+                        activeFolderJobs.delete(downloadId);
+                        console.log('[Folder Download] User cancelled dialog, removed from activeFolderJobs:', downloadId);
                         return { success: false, cancelled: true, dialogCancelled: true };
                     }
                     
                     if (result.response === 2) { // Skip
-                        // Remove from queue and reject
-                        const jobIndex = downloadQueue.findIndex((j: any) => j.id === downloadId);
-                        if (jobIndex !== -1) {
-                            const job = downloadQueue.splice(jobIndex, 1)[0] as any;
-                            if (job.pendingDialogReject) job.pendingDialogReject(new Error('User skipped'));
-                        }
+                        // Remove from activeFolderJobs to stop the wait loop
+                        activeFolderJobs.delete(downloadId);
+                        console.log('[Folder Download] User skipped, removed from activeFolderJobs:', downloadId);
                         return { success: false, cancelled: true, dialogCancelled: false, skipped: true };
                     }
                     
@@ -1794,12 +1838,8 @@ ipcMain.handle('ftp:download-folder', async (event, { remotePath, folderName, do
 
             if (canceled || !filePath) {
                 console.log('[Folder Download] User cancelled save dialog');
-                // Remove from queue and reject
-                const jobIndex = downloadQueue.findIndex((j: any) => j.id === downloadId);
-                if (jobIndex !== -1) {
-                    const job = downloadQueue.splice(jobIndex, 1)[0] as any;
-                    if (job.pendingDialogReject) job.pendingDialogReject(new Error('User cancelled'));
-                }
+                // Remove from activeFolderJobs to stop the wait loop
+                activeFolderJobs.delete(downloadId);
                 return { success: false, cancelled: true, canceled: true, dialogCancelled: true };
             }
 

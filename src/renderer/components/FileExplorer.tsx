@@ -282,6 +282,11 @@ const FileExplorer = () => {
       );
       
       if (response?.dialogCancelled) {
+        // Cancel the backend job that's waiting for dialog resolution
+        const electron = (window as any).electronAPI;
+        if (electron?.cancelDownloadFolder) {
+          electron.cancelDownloadFolder(downloadId);
+        }
         removeDownload(downloadId);
         return;
       }
@@ -1696,8 +1701,14 @@ const FileExplorer = () => {
 
         {/* Properties Modal */}
         {propertiesFile && (
-            <div className="absolute inset-0 z-50 bg-background/80 backdrop-blur flex items-center justify-center p-4">
-                <div className="bg-card border border-border shadow-xl rounded-lg w-96 max-w-full p-6 space-y-4">
+            <div 
+                className="absolute inset-0 z-50 bg-background/80 backdrop-blur flex items-center justify-center p-4"
+                onClick={() => setPropertiesFile(null)}
+            >
+                <div 
+                    className="bg-card border border-border shadow-xl rounded-lg w-96 max-w-full p-6 space-y-4"
+                    onClick={(e) => e.stopPropagation()}
+                >
                     <div className="flex justify-between items-center">
                         <h3 className="font-bold text-lg flex items-center gap-2">
                             <Info size={18} />
@@ -1712,6 +1723,12 @@ const FileExplorer = () => {
                             <span className="col-span-2 font-mono truncate">{propertiesFile.name}</span>
                         </div>
                         <div className="grid grid-cols-3 gap-2">
+                            <span className="text-muted-foreground">Full Path:</span>
+                            <span className="col-span-2 font-mono text-xs break-all">
+                                {currentPath === '/' ? `/${propertiesFile.name}` : `${currentPath}/${propertiesFile.name}`}
+                            </span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2">
                             <span className="text-muted-foreground">Size:</span>
                             <span className="col-span-2">{formatBytes(propertiesFile.size)}</span>
                         </div>
@@ -1723,25 +1740,19 @@ const FileExplorer = () => {
                             <span className="text-muted-foreground">Owner/Group:</span>
                             <span className="col-span-2">{propertiesFile.owner} / {propertiesFile.group}</span>
                         </div>
-                        <div className="grid grid-cols-3 gap-2 items-center">
+                        <div className="grid grid-cols-3 gap-2">
                             <span className="text-muted-foreground">Permissions:</span>
-                            <div className="col-span-2 flex gap-2">
-                                <input 
-                                    className="bg-input border border-border rounded px-2 py-1 w-full font-mono"
-                                    value={newPermissions}
-                                    onChange={(e) => setNewPermissions(e.target.value)}
-                                    placeholder="e.g. 755 or -rw-r--r--"
-                                />
-                            </div>
+                            <span className="col-span-2 font-mono">{propertiesFile.rights?.user || 'r'}{propertiesFile.rights?.group || 'r'}{propertiesFile.rights?.other || 'r'}</span>
                         </div>
-                        <p className="text-[10px] text-muted-foreground italic">
-                            Enter octal (e.g. 755) or modification depends on server support.
-                        </p>
                     </div>
 
-                    <div className="flex justify-end gap-2 pt-2">
-                        <button onClick={() => setPropertiesFile(null)} className="px-3 py-1.5 text-sm hover:bg-accent rounded">Cancel</button>
-                        <button onClick={savePermissions} className="px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded">Save Changes</button>
+                    <div className="flex justify-end pt-2">
+                        <button 
+                            onClick={() => setPropertiesFile(null)} 
+                            className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-colors"
+                        >
+                            OK
+                        </button>
                     </div>
                 </div>
             </div>
