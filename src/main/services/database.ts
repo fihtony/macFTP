@@ -324,6 +324,12 @@ export const saveAllDownloads = (downloads: DownloadHistoryItem[]): void => {
   // Combine active + history (preserve all active, limit history to 1000)
   const allToSave = [...activeDownloads, ...sortedHistory];
   
+  // Encrypt sensitive fields in download history (siteHost)
+  const encryptedDownloads = allToSave.map(download => ({
+    ...download,
+    siteHost: download.siteHost ? encrypt(download.siteHost) : undefined
+  }));
+  
   console.log('[Database] Saving downloads:', {
     active: activeDownloads.length,
     history: sortedHistory.length,
@@ -332,8 +338,8 @@ export const saveAllDownloads = (downloads: DownloadHistoryItem[]): void => {
   });
   
   try {
-    (store as any).set('downloadHistory', allToSave);
-    console.log('[Database] Successfully saved downloads to database');
+    (store as any).set('downloadHistory', encryptedDownloads);
+    console.log('[Database] Successfully saved downloads to database (with encrypted hosts)');
   } catch (error) {
     console.error('[Database] Error saving downloads:', error);
     throw error;
@@ -342,7 +348,29 @@ export const saveAllDownloads = (downloads: DownloadHistoryItem[]): void => {
 
 export const loadAllDownloads = (): DownloadHistoryItem[] => {
   try {
-    const downloads = (store as any).get('downloadHistory', []) as DownloadHistoryItem[];
+    const encryptedDownloads = (store as any).get('downloadHistory', []) as any[];
+    
+    // Decrypt sensitive fields in download history (siteHost)
+    const downloads = encryptedDownloads.map((download: any) => {
+      let decryptedHost = download.siteHost;
+      
+      // Helper function to decrypt if encrypted (contains ':')
+      if (decryptedHost && typeof decryptedHost === 'string' && decryptedHost.includes(':')) {
+        const decrypted = decrypt(decryptedHost);
+        if (!decrypted && decryptedHost) {
+          console.warn('[Database] Failed to decrypt siteHost for download:', download.id);
+          decryptedHost = ''; // Clear invalid encrypted value
+        } else {
+          decryptedHost = decrypted || undefined;
+        }
+      }
+      
+      return {
+        ...download,
+        siteHost: decryptedHost || download.siteHost // Use decrypted or original if not encrypted
+      };
+    });
+    
     const activeCount = downloads.filter(d => 
       d.status === 'queued' || d.status === 'downloading' || d.status === 'paused'
     ).length;
@@ -354,7 +382,7 @@ export const loadAllDownloads = (): DownloadHistoryItem[] => {
       active: activeCount,
       history: historyCount
     });
-    return downloads;
+    return downloads as DownloadHistoryItem[];
   } catch (error) {
     console.error('[Database] Error loading downloads:', error);
     return [];
