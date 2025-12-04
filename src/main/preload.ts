@@ -39,10 +39,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   createDirectory: (targetPath: string) => ipcRenderer.invoke('ftp:create-directory', { targetPath }),
   getPathInfo: (targetPath: string) => ipcRenderer.invoke('fs:path-info', { targetPath }),
   uploadFolder: (localPath: string, remotePath: string) => ipcRenderer.invoke('ftp:upload-folder', { localPath, remotePath }),
+  downloadFolder: (remotePath: string, folderName: string, downloadId: string, defaultDownloadPath?: string, duplicateAction?: 'overwrite' | 'rename' | 'skip', applyToAll?: boolean) => 
+    ipcRenderer.invoke('ftp:download-folder', { remotePath, folderName, downloadId, defaultDownloadPath, duplicateAction, applyToAll }),
+  cancelDownloadFolder: (downloadId: string) => ipcRenderer.invoke('download-folder:cancel', { downloadId }),
   onUploadProgress: (callback: (data: any) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: any) => callback(data);
     ipcRenderer.on('upload:progress', handler);
     return () => ipcRenderer.removeListener('upload:progress', handler);
+  },
+  onDownloadFolderProgress: (callback: (data: any) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: any) => callback(data);
+    ipcRenderer.on('download-folder:progress', handler);
+    return () => ipcRenderer.removeListener('download-folder:progress', handler);
   },
   pauseUpload: (uploadId: string) => ipcRenderer.invoke('upload:pause', { uploadId }),
   resumeUpload: (uploadId: string) => ipcRenderer.invoke('upload:resume', { uploadId }),

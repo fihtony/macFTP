@@ -17,7 +17,7 @@ const Toast: React.FC<ToastProps> = ({ message, type = 'info', duration = 3000, 
     }, duration);
 
     return () => clearTimeout(timer);
-  }, [duration, onClose]);
+  }, [duration]); // Remove onClose from dependencies to prevent timer reset
 
   // Calculate right offset based on download manager visibility
   const rightOffset = showDownloadManager ? `${downloadManagerWidth}px` : '0px';

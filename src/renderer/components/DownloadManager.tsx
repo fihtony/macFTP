@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Download, Clock, CheckCircle2, XCircle, X, Trash2, History } from 'lucide-react';
 import { DownloadItem } from './DownloadProgressDialog';
 import { formatBytes, formatRelativeTime, formatDate, formatTime } from '../utils';
@@ -30,6 +30,54 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
     type: 'clear' | 'delete';
     id?: string;
   } | null>(null);
+  
+  const activeListRef = useRef<HTMLDivElement>(null);
+  const historyListRef = useRef<HTMLDivElement>(null);
+  const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Handle scroll event to show/hide scrollbar
+  useEffect(() => {
+    const handleScroll = (element: HTMLDivElement) => {
+      return () => {
+        element.classList.add('scrolling');
+        
+        if (scrollTimeoutRef.current) {
+          clearTimeout(scrollTimeoutRef.current);
+        }
+        
+        scrollTimeoutRef.current = setTimeout(() => {
+          element.classList.remove('scrolling');
+        }, 1000);
+      };
+    };
+
+    const activeList = activeListRef.current;
+    const historyList = historyListRef.current;
+    
+    let activeScrollHandler: (() => void) | null = null;
+    let historyScrollHandler: (() => void) | null = null;
+
+    if (activeList) {
+      activeScrollHandler = handleScroll(activeList);
+      activeList.addEventListener('scroll', activeScrollHandler);
+    }
+    if (historyList) {
+      historyScrollHandler = handleScroll(historyList);
+      historyList.addEventListener('scroll', historyScrollHandler);
+    }
+
+    return () => {
+      if (activeList && activeScrollHandler) {
+        activeList.removeEventListener('scroll', activeScrollHandler);
+      }
+      if (historyList && historyScrollHandler) {
+        historyList.removeEventListener('scroll', historyScrollHandler);
+      }
+      if (scrollTimeoutRef.current) {
+        clearTimeout(scrollTimeoutRef.current);
+      }
+    };
+  }, [showHistory]);
 
   const activeDownloads = downloads.filter(d => 
     d.status === 'queued' || d.status === 'downloading'
@@ -49,7 +97,7 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
       case 'downloading':
         return <Download size={16} className="text-primary animate-pulse" />;
       case 'queued':
-        return <Clock size={16} className="text-muted-foreground" />;
+        return <Clock size={16} className="text-yellow-500" />;
       default:
         return <Download size={16} />;
     }
@@ -89,7 +137,7 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
             <div className="flex-1 min-w-0">
               {/* First line: File name */}
               <div className="flex items-center gap-2 mb-0.5">
-                <span className="text-xs font-medium truncate">
+                <span className={`text-xs font-medium truncate ${download.isFolder ? 'text-blue-400' : ''}`}>
                   {download.fileName}
                 </span>
                 {download.status === 'completed' && (
@@ -163,7 +211,14 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center justify-between mb-1 gap-2">
-                <p className="text-sm font-medium truncate">{download.fileName}</p>
+                <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                  <p className="text-sm font-medium truncate">{download.fileName}</p>
+                  {download.isFolder && (
+                    <span className="px-1.5 py-0.5 text-[9px] font-medium bg-blue-500/20 text-blue-400 rounded flex-shrink-0">
+                      Folder
+                    </span>
+                  )}
+                </div>
                 {isCancelling && (
                   <span className="px-1.5 py-0.5 text-[9px] font-medium bg-yellow-500/20 text-yellow-500 rounded flex-shrink-0">
                     Cancelling
@@ -320,18 +375,20 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
       </div>
 
       {/* Active Downloads */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-2">
+      <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-2">
         {activeDownloads.length === 0 && !showHistory && (
           <div className="text-center text-sm text-muted-foreground py-8">
             No active downloads
           </div>
         )}
 
-        {!showHistory && activeDownloads.map(download => renderDownloadItem(download))}
+        <div ref={activeListRef} className="custom-scrollbar flex-1 overflow-y-auto">
+          {!showHistory && activeDownloads.map(download => renderDownloadItem(download))}
+        </div>
 
         {/* History Section */}
         {showHistory && (
-          <>
+          <div ref={historyListRef} className="custom-scrollbar flex-1 overflow-y-auto">
             {historyDownloads.length > 0 && (
               <div>
                 <div className="flex items-center justify-between mb-2 px-4 pt-2">
@@ -347,7 +404,14 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
                   )}
                 </div>
                 <div className="space-y-px">
-                  {historyDownloads.map(download => renderHistoryItem(download))}
+                  {historyDownloads.map(download => (
+                    <div 
+                      key={download.id}
+                      className={download.isFolder ? 'bg-blue-500/5' : ''}
+                    >
+                      {renderHistoryItem(download)}
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
@@ -357,7 +421,7 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
                 No download history
               </div>
             )}
-          </>
+          </div>
         )}
       </div>
       

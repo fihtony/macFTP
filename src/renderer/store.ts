@@ -176,24 +176,39 @@ export const useStore = create<AppState>((set, get) => ({
   },
   cancelDownload: (id) => {
     const electron = (window as any).electronAPI;
-    if (electron?.cancelDownload) {
-      electron.cancelDownload(id);
+    const download = get().downloads.find(d => d.id === id);
+    
+    if (download?.isFolder) {
+      // Use folder-specific cancel
+      if (electron?.cancelDownloadFolder) {
+        console.log('[Store] Cancelling folder download:', id);
+        electron.cancelDownloadFolder(id);
+      }
+    } else {
+      // Use regular file cancel
+      if (electron?.cancelDownload) {
+        console.log('[Store] Cancelling file download:', id);
+        electron.cancelDownload(id);
+      }
     }
+    
+    // DON'T set status to cancelled immediately
+    // Just clear the progress data and let the backend confirm the cancellation
+    // This keeps the download in the active list while cancelling
     set((state) => ({
       downloads: state.downloads.map(d => 
         d.id === id && (d.status === 'downloading' || d.status === 'queued')
           ? { 
               ...d, 
-              status: 'cancelled' as const, 
               downloadedSize: 0,
               speed: undefined,
-              eta: undefined,
-              endTime: Date.now() 
+              eta: undefined
+              // Status remains 'downloading' until backend confirms cancellation
             }
           : d
       )
     }));
-    get().saveDownloads(); // Auto-save
+    // Don't save yet - wait for backend confirmation
   },
   clearHistory: () => {
     set((state) => ({

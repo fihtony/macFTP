@@ -49,6 +49,7 @@ interface UploadTaskState {
   currentFileSize?: number;
   speed?: number;
   folderName?: string;
+  cancelRequested?: boolean;
 }
 
 interface DeleteDialogState {
@@ -87,7 +88,7 @@ const FileExplorer = () => {
   const [previewFileName, setPreviewFileName] = useState<string | null>(null);
   const [previewRemotePath, setPreviewRemotePath] = useState<string | null>(null);
   const [previewFileInfo, setPreviewFileInfo] = useState<RemoteFile | null>(null);
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' | 'warning' } | null>(null);
   const [isCreateFolderModalOpen, setIsCreateFolderModalOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [searchText, setSearchText] = useState<string>('');
@@ -239,6 +240,104 @@ const FileExplorer = () => {
   const enqueueFolderUpload = useCallback((request: FolderUploadRequest) => {
     setFolderUploadQueue((prev) => [...prev, request]);
   }, []);
+
+  const handleFolderDownload = async (file: RemoteFile, remotePath: string) => {
+    const electron = (window as any).electronAPI;
+    if (!electron) return;
+
+    // Get default download path from current site
+    const defaultDownloadPath = currentSite?.defaultDownloadPath;
+    const actionToUse = applyToAll ? duplicateAction : null;
+    
+    // Create download item first - MUST be 'queued' status to show clock icon
+    const downloadId = `folder-download-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const downloadItem: DownloadItem = {
+      id: downloadId,
+      fileName: file.name,
+      remotePath: remotePath,
+      localPath: '', // Will be set after path is determined
+      totalSize: 0,
+      downloadedSize: 0,
+      status: 'queued', // Important: Start as queued to show yellow clock icon
+      startTime: Date.now(),
+      siteName: currentSite?.name,
+      siteHost: currentSite?.host,
+      siteId: currentSite?.id,
+      isFolder: true,
+      totalFiles: 0,
+      completedFiles: 0
+    };
+
+    addDownload(downloadItem);
+    
+    // Start folder download (backend will handle duplicate detection and dialog)
+    try {
+      const response = await electron.downloadFolder(
+        remotePath, 
+        file.name, 
+        downloadId,
+        defaultDownloadPath,
+        actionToUse || undefined,
+        applyToAll
+      );
+      
+      if (response?.dialogCancelled) {
+        removeDownload(downloadId);
+        return;
+      }
+      
+      if (response?.skipped) {
+        removeDownload(downloadId);
+        setToast({ message: `Folder download skipped: ${file.name}`, type: 'info' });
+        return;
+      }
+      
+      if (!response?.success) {
+        updateDownload(downloadId, {
+          status: 'failed',
+          error: response?.error || 'Unknown error',
+          endTime: Date.now()
+        });
+        setToast({ message: `Failed to start folder download: ${response?.error || 'Unknown error'}`, type: 'error' });
+        return;
+      }
+      
+      // Update duplicate action preferences if user chose "apply to all"
+      if (response.applyToAll && response.duplicateAction) {
+        setDuplicateAction(response.duplicateAction);
+        setApplyToAll(true);
+      }
+      
+      // Update local path and actual folder name (might be renamed)
+      // DO NOT change status to 'downloading' here - let the backend control status
+      if (response.savedPath) {
+        const updates: any = {
+          localPath: response.savedPath
+          // Status remains 'queued' - backend will update to 'downloading' when it actually starts
+        };
+        
+        // Update folder name if it was renamed
+        if (response.actualFileName && response.actualFileName !== file.name) {
+          updates.fileName = response.actualFileName;
+        }
+        
+        updateDownload(downloadId, updates);
+      }
+      
+      console.log('[FileExplorer] Folder download started:', { 
+        downloadId, 
+        savedPath: response.savedPath,
+        actualFileName: response.actualFileName 
+      });
+    } catch (err: any) {
+      updateDownload(downloadId, {
+        status: 'failed',
+        error: err.message || 'Unknown error',
+        endTime: Date.now()
+      });
+      setToast({ message: `Failed to start folder download: ${err.message || 'Unknown error'}`, type: 'error' });
+    }
+  };
 
   const initiateFolderUpload = useCallback(async (request: FolderUploadRequest) => {
     const electron = (window as any).electronAPI;
@@ -531,6 +630,7 @@ const FileExplorer = () => {
     };
   }, [handleNavigate, currentPath, setToast]);
 
+
   const scrollToMatch = useCallback((index: number) => {
     if (index < 0 || index >= searchMatches.length || !previewContent || !searchText) return;
     
@@ -754,6 +854,12 @@ const FileExplorer = () => {
 
     const remotePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
     
+    // Handle folder download differently
+    if (file.type === 'd') {
+      handleFolderDownload(file, remotePath);
+      return;
+    }
+    
     // Create download item first (localPath will be set after user selects save location)
     const downloadId = `download-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const downloadItem: DownloadItem = {
@@ -798,9 +904,8 @@ const FileExplorer = () => {
       return;
     }
 
-    // Mark as in progress while queued/executing
-    // Note: We'll update the file name after the download path is determined
-    updateDownload(downloadId, { status: 'downloading' });
+    // Don't update status here - let the backend control it
+    // The backend will send status: 'downloading' along with actualFileName and localPath
 
     downloadPromise.then((result: any) => {
       console.log('[FileExplorer] Download promise resolved:', { 
@@ -1157,7 +1262,7 @@ const FileExplorer = () => {
                 
                 <pre 
                     ref={textPreviewRef}
-                    className="text-preview-content flex-1 overflow-auto p-4 bg-muted/50 text-xs font-mono whitespace-pre-wrap relative"
+                    className="text-preview-content flex-1 overflow-auto custom-scrollbar p-4 bg-muted/50 text-xs font-mono whitespace-pre-wrap relative"
                 >
                     {previewContent && searchText ? (
                         (() => {
@@ -1504,7 +1609,7 @@ const FileExplorer = () => {
                 {/* Image container with zoom controls */}
                 <div 
                     ref={imageContainerRef}
-                    className="flex-1 flex items-center justify-center p-8 overflow-auto relative"
+                    className="flex-1 flex items-center justify-center p-8 overflow-auto custom-scrollbar relative"
                 >
                     <img 
                         src={previewImage || ''}
@@ -1679,7 +1784,7 @@ const FileExplorer = () => {
                         />
                         {showPathSuggestions && (pathSuggestions.length > 0 || isLoadingSuggestions) && (
                             <div 
-                                className="path-suggestions-container absolute top-full left-0 right-0 mt-1 bg-card border border-border rounded shadow-lg z-50 max-h-48 overflow-y-auto"
+                                className="path-suggestions-container absolute top-full left-0 right-0 mt-1 bg-card border border-border rounded shadow-lg z-50 max-h-48 overflow-y-auto custom-scrollbar"
                                 onMouseDown={(e) => e.preventDefault()} // Prevent input blur when clicking suggestions
                             >
                                 {isLoadingSuggestions && pathSuggestions.length === 0 && (
@@ -1741,7 +1846,7 @@ const FileExplorer = () => {
         </div>
 
         {/* File List */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto custom-scrollbar">
             {remoteFiles.map((file, idx) => (
                 <div 
                     key={idx}
@@ -1770,28 +1875,48 @@ const FileExplorer = () => {
                         {format(file.date, 'MMM d, HH:mm')}
                     </div>
                     <div className={clsx(
-                        "col-span-2 flex items-center justify-center gap-2 transition-opacity",
+                        "col-span-2 flex items-center justify-center gap-1 transition-opacity",
                         selectedFile === file.name ? "opacity-100" : "opacity-0 group-hover:opacity-100"
                     )}>
-                         <button onClick={(e) => openProperties(file, e)} className="p-1 hover:text-primary" title="Properties">
+                         <button 
+                            onClick={(e) => openProperties(file, e)} 
+                            className="p-1 hover:bg-accent/80 hover:text-primary hover:scale-110 rounded transition-all" 
+                            title="Properties"
+                         >
                              <Info size={14} />
                          </button>
-                        {file.type !== 'd' && (
+                        {file.type !== 'd' ? (
                             <>
-                                <button onClick={(e) => handleQuickView(file, e)} className="p-1 hover:text-primary" title="Quick View">
+                                <button 
+                                    onClick={(e) => handleQuickView(file, e)} 
+                                    className="p-1 hover:bg-accent/80 hover:text-primary hover:scale-110 rounded transition-all" 
+                                    title="Quick View"
+                                >
                                     <Eye size={14} />
                                 </button>
-                                <button onClick={(e) => handleDownload(file, e)} className="p-1 hover:text-primary" title="Download">
+                                <button 
+                                    onClick={(e) => handleDownload(file, e)} 
+                                    className="p-1 hover:bg-accent/80 hover:text-primary hover:scale-110 rounded transition-all" 
+                                    title="Download"
+                                >
                                     <Download size={14} />
                                 </button>
                             </>
+                        ) : (
+                            <button 
+                                onClick={(e) => handleDownload(file, e)} 
+                                className="p-1 hover:bg-accent/80 hover:text-primary hover:scale-110 rounded transition-all" 
+                                title="Download Folder"
+                            >
+                                <Download size={14} />
+                            </button>
                         )}
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
                             openDeleteDialog(file);
                           }}
-                          className="p-1 hover:text-red-500"
+                          className="p-1 hover:bg-red-500/20 hover:text-red-400 hover:scale-110 rounded transition-all"
                           title={`Delete ${file.type === 'd' ? 'folder' : 'file'}`}
                         >
                           <Trash2 size={14} />

@@ -295,7 +295,7 @@ const Sidebar = () => {
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
           {sites.length === 0 && !showModal && (
             <div className="text-center p-4 text-xs text-muted-foreground">
               No sites saved. <br/><br/>

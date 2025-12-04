@@ -38,6 +38,7 @@ function App() {
   const cancellingDownloadsRef = React.useRef<Set<string>>(new Set());
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' | 'warning' } | null>(null);
   const processedCancellations = React.useRef<Set<string>>(new Set());
+  const completedDownloadsRef = React.useRef<Set<string>>(new Set());
   
   // Panel widths - use store for sidebar width so FileExplorer can access it
   const sidebarWidth = useStore((state) => state.sidebarWidth);
@@ -111,11 +112,20 @@ function App() {
       if (payload.startTime) {
         updates.startTime = payload.startTime;
       }
+      if (payload.endTime) {
+        updates.endTime = payload.endTime;
+      }
       if ((payload as any).actualFileName) {
         updates.fileName = (payload as any).actualFileName;
       }
       if ((payload as any).localPath) {
         updates.localPath = (payload as any).localPath;
+      }
+      if (typeof (payload as any).totalFiles === 'number') {
+        updates.totalFiles = (payload as any).totalFiles;
+      }
+      if (typeof (payload as any).completedFiles === 'number') {
+        updates.completedFiles = (payload as any).completedFiles;
       }
 
       updateDownload(payload.id, updates, { persist: false });
@@ -148,9 +158,15 @@ function App() {
         
         // Show toast notification (only once per cancellation)
         if (download.status === 'cancelled') {
-          setToast({ message: `Download cancelled: ${download.fileName}`, type: 'warning' });
+          const message = download.isFolder 
+            ? `Folder download cancelled: ${download.fileName}` 
+            : `Download cancelled: ${download.fileName}`;
+          setToast({ message, type: 'warning' });
         } else if (download.status === 'failed') {
-          setToast({ message: `Download failed: ${download.fileName}`, type: 'error' });
+          const message = download.isFolder 
+            ? `Folder download failed: ${download.fileName}` 
+            : `Download failed: ${download.fileName}`;
+          setToast({ message, type: 'error' });
         }
         
         // Auto-dismiss dialog if this download is selected
@@ -177,6 +193,19 @@ function App() {
             processedCancellations.current.delete(download.id);
           }, 5000);
         }, 2500);
+      }
+      
+      // Show toast for completed downloads (including folders)
+      if (download.status === 'completed' && download.endTime && !completedDownloadsRef.current.has(download.id)) {
+        const now = Date.now();
+        // Only show if completed within last 3 seconds (to avoid showing old completions on load)
+        if (now - download.endTime < 3000) {
+          completedDownloadsRef.current.add(download.id);
+          const message = download.isFolder 
+            ? `Folder downloaded: ${download.fileName} (${download.completedFiles || 0} files)` 
+            : `Downloaded: ${download.fileName}`;
+          setToast({ message, type: 'success' });
+        }
       }
     });
   }, [downloads, selectedDownloadId]);
@@ -233,11 +262,8 @@ function App() {
                   eta: undefined
                   // DO NOT clear localPath - it should remain for the cancelled record
                 }, { persist: false });
-                // Call backend to cancel - don't update status yet, wait for backend confirmation
-                const electron = (window as any).electronAPI;
-                if (electron?.cancelDownload) {
-                  electron.cancelDownload(id);
-                }
+                // Use the store's cancelDownload which handles both files and folders
+                cancelDownload(id);
               }}
               onRemove={removeDownload}
               onClearHistory={clearHistory}
@@ -265,11 +291,8 @@ function App() {
               eta: undefined
               // DO NOT clear localPath - it should remain for the cancelled record
             }, { persist: false });
-            // Call backend to cancel - don't update status yet, wait for backend confirmation
-            const electron = (window as any).electronAPI;
-            if (electron?.cancelDownload) {
-              electron.cancelDownload(selectedDownload.id);
-            }
+            // Use the store's cancelDownload which handles both files and folders
+            cancelDownload(selectedDownload.id);
           }}
           onRemove={() => {
             removeDownload(selectedDownload.id);

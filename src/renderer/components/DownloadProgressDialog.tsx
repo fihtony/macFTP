@@ -18,6 +18,9 @@ export interface DownloadItem {
   siteName?: string; // FTP site name
   siteHost?: string; // FTP site host
   siteId?: string; // FTP site ID for updating site name
+  isFolder?: boolean; // Folder download
+  totalFiles?: number; // Total files in folder
+  completedFiles?: number; // Completed files in folder
 }
 
 interface DownloadProgressDialogProps {
@@ -70,20 +73,27 @@ const DownloadProgressDialog: React.FC<DownloadProgressDialogProps> = ({
     <div 
       className="fixed inset-0 z-[200] bg-background/80 backdrop-blur flex items-center justify-center"
       onClick={(e) => {
-        // Close dialog when clicking outside (unless it's being cancelled)
-        if (e.target === e.currentTarget && showInBackground && !showCancelling) {
+        // Close dialog when clicking outside (allow dismissal even when cancelling)
+        if (e.target === e.currentTarget && showInBackground) {
           showInBackground();
         }
       }}
     >
       <div 
-        className="bg-card border border-border rounded-lg shadow-xl p-6 w-[600px] max-w-full max-h-[80vh] overflow-y-auto"
+        className="bg-card border border-border rounded-lg shadow-xl p-6 w-[600px] max-w-full max-h-[80vh] overflow-y-auto custom-scrollbar"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between mb-4">
           <div className="flex-1 min-w-0">
             <div className="flex items-center justify-between gap-3 mb-1">
-              <h3 className="text-lg font-semibold truncate">{download.fileName}</h3>
+              <div className="flex items-center gap-2 flex-1 min-w-0">
+                <h3 className="text-lg font-semibold truncate">{download.fileName}</h3>
+                {download.isFolder && (
+                  <span className="px-2 py-1 text-xs font-medium bg-blue-500/20 text-blue-400 rounded flex-shrink-0">
+                    Folder
+                  </span>
+                )}
+              </div>
               <div className="flex items-center gap-2">
                 {isCompleted && (
                   <span className="px-2 py-1 text-xs font-medium bg-green-500/20 text-green-500 rounded flex items-center gap-1 flex-shrink-0">
@@ -211,7 +221,7 @@ const DownloadProgressDialog: React.FC<DownloadProgressDialogProps> = ({
                 'text-muted-foreground'
               }`}>
                 {download.status === 'queued' && 'Queued'}
-                {download.status === 'downloading' && (showCancelling ? 'Cancelling...' : 'Downloading...')}
+                {download.status === 'downloading' && !showCancelling && 'Downloading...'}
                 {download.status === 'failed' && `Failed: ${download.error || 'Unknown error'}`}
               </span>
             </div>
@@ -220,7 +230,9 @@ const DownloadProgressDialog: React.FC<DownloadProgressDialogProps> = ({
         
         {isCompleted && download.endTime && (
           <div className="text-xs text-muted-foreground">
-            Downloaded at {new Date(download.endTime).toLocaleString()}
+            {download.isFolder && download.completedFiles 
+              ? `${download.completedFiles} files downloaded at ${new Date(download.endTime).toLocaleString()}`
+              : `Downloaded at ${new Date(download.endTime).toLocaleString()}`}
           </div>
         )}
       </div>
