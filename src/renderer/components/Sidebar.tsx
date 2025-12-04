@@ -9,7 +9,7 @@ import DeleteSiteDialog from './DeleteSiteDialog';
 import ConfirmDialog from './ConfirmDialog';
 
 const Sidebar = () => {
-  const { sites, addSite, updateSite, removeSite, isConnected, currentSite } = useStore();
+  const { sites, addSite, updateSite, removeSite, isConnected, currentSite, settings, updateSettings } = useStore();
   const [showModal, setShowModal] = useState(false);
   const [editingSite, setEditingSite] = useState<Site | null>(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -403,22 +403,63 @@ const Sidebar = () => {
           
           {showSettings && (
             <div className="mt-3 p-3 bg-background/50 rounded text-xs space-y-2 border border-border">
-              <div className="font-semibold mb-2">Application Settings</div>
-              <div className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <span>Sites Count:</span>
-                  <span className="font-mono">{sites.length}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span>Status:</span>
-                  <span className={isConnected ? 'text-green-400' : 'text-muted-foreground'}>
-                    {isConnected ? 'Connected' : 'Disconnected'}
-                  </span>
-                </div>
+              {/* Max Concurrent Downloads */}
+              <div className="flex items-center justify-between">
+                <label className="text-muted-foreground">Max Concurrent Downloads:</label>
+                <select
+                  value={settings.maxConcurrentDownloads}
+                  onChange={(e) => updateSettings({ maxConcurrentDownloads: parseInt(e.target.value) })}
+                  className="px-2 py-0.5 bg-input border border-border rounded text-xs w-16"
+                >
+                  {[1, 2, 3, 4, 5].map(num => (
+                    <option key={num} value={num}>{num}</option>
+                  ))}
+                </select>
               </div>
+              
+              {/* File Conflict Resolution */}
+              <div className="flex items-center justify-between">
+                <label className="text-muted-foreground">When File Exists:</label>
+                <select
+                  value={settings.defaultConflictResolution}
+                  onChange={(e) => updateSettings({ defaultConflictResolution: e.target.value as any })}
+                  className="px-2 py-0.5 bg-input border border-border rounded text-xs"
+                >
+                  <option value="prompt">Ask</option>
+                  <option value="rename">Rename</option>
+                  <option value="overwrite">Overwrite</option>
+                </select>
+              </div>
+              
+              {/* Show Hidden Files */}
+              <div className="flex items-center justify-between">
+                <label className="text-muted-foreground">Show Hidden Files:</label>
+                <input
+                  type="checkbox"
+                  checked={settings.showHiddenFiles}
+                  onChange={(e) => updateSettings({ showHiddenFiles: e.target.checked })}
+                  className="w-4 h-4"
+                />
+              </div>
+              
               <div className="pt-2 border-t border-border text-[10px] text-muted-foreground">
-                MacFTP v1.0.0<br/>
-                Data is stored locally
+                <span>Support: </span>
+                <a 
+                  href="mailto:fihtony@gmail.com?subject=MacFTP Support"
+                  className="text-primary hover:text-primary/80 transition-colors cursor-pointer underline decoration-dotted"
+                  title="fihtony@gmail.com"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    const electron = (window as any).electronAPI;
+                    if (electron?.openExternal) {
+                      electron.openExternal('mailto:fihtony@gmail.com?subject=MacFTP Support');
+                    } else {
+                      window.open('mailto:fihtony@gmail.com?subject=MacFTP Support', '_blank');
+                    }
+                  }}
+                >
+                  Tony Xu
+                </a>
               </div>
             </div>
           )}

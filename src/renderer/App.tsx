@@ -53,6 +53,12 @@ function App() {
     // Load download history from database on app start
     loadDownloads();
     
+    // Load settings from database
+    const loadSettings = useStore.getState().loadSettings;
+    if (loadSettings) {
+      loadSettings();
+    }
+    
     // Initialize theme from localStorage on mount
     const savedTheme = localStorage.getItem('macftp-theme') as 'light' | 'dark' | null;
     if (savedTheme) {

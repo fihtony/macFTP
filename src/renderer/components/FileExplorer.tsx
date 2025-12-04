@@ -73,6 +73,12 @@ const FileExplorer = () => {
   const sidebarWidth = useStore((state) => state.sidebarWidth || 256);
   const tempFilePath = useStore((state) => state.tempFilePath);
   const setTempFilePath = useStore((state) => state.setTempFilePath);
+  const settings = useStore((state) => state.settings);
+  
+  // Filter hidden files based on settings
+  const visibleFiles = settings.showHiddenFiles 
+    ? remoteFiles 
+    : remoteFiles.filter(file => !file.name.startsWith('.'));
   const [previewContent, setPreviewContent] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -278,7 +284,8 @@ const FileExplorer = () => {
         downloadId,
         defaultDownloadPath,
         actionToUse || undefined,
-        applyToAll
+        applyToAll,
+        settings.defaultConflictResolution
       );
       
       if (response?.dialogCancelled) {
@@ -743,7 +750,7 @@ const FileExplorer = () => {
         const currentDirLower = currentPath.toLowerCase();
         const inputLower = inputPath.toLowerCase();
         
-        remoteFiles.forEach(file => {
+        visibleFiles.forEach(file => {
           if (file.type === 'd') {
             const fileLower = file.name.toLowerCase();
             const currentDir = currentPath === '/' ? '' : currentPath;
@@ -897,7 +904,8 @@ const FileExplorer = () => {
         file.size || 0,
         defaultDownloadPath,
         actionToUse || undefined,
-        applyToAll
+        applyToAll,
+        settings.defaultConflictResolution
       );
     } catch (err: any) {
       updateDownload(downloadId, {
@@ -1734,7 +1742,12 @@ const FileExplorer = () => {
                         </div>
                         <div className="grid grid-cols-3 gap-2">
                             <span className="text-muted-foreground">Type:</span>
-                            <span className="col-span-2">{propertiesFile.type === 'd' ? 'Directory' : 'File'}</span>
+                            <span className="col-span-2">
+                                {propertiesFile.type === 'd' ? 'Directory' : 'File'}
+                                {propertiesFile.name.startsWith('.') && (
+                                    <span className="ml-2 text-xs text-muted-foreground/70">(Hidden)</span>
+                                )}
+                            </span>
                         </div>
                         <div className="grid grid-cols-3 gap-2">
                             <span className="text-muted-foreground">Owner/Group:</span>
@@ -1858,7 +1871,7 @@ const FileExplorer = () => {
 
         {/* File List */}
         <div className="flex-1 overflow-y-auto custom-scrollbar">
-            {remoteFiles.map((file, idx) => (
+            {visibleFiles.map((file, idx) => (
                 <div 
                     key={idx}
                     style={{ animationDelay: `${Math.min(idx * 0.03, 0.3)}s` }}
@@ -1877,7 +1890,14 @@ const FileExplorer = () => {
                         ) : (
                             <File size={16} className="text-slate-400" />
                         )}
-                        <span className="truncate">{file.name}</span>
+                        <span className={`truncate ${file.name.startsWith('.') ? 'text-muted-foreground/60 italic' : ''}`}>
+                            {file.name}
+                        </span>
+                        {file.name.startsWith('.') && (
+                            <span className="text-[9px] px-1 py-0.5 bg-muted/40 text-muted-foreground rounded flex-shrink-0">
+                                Hidden
+                            </span>
+                        )}
                     </div>
                     <div className="col-span-2 text-right text-muted-foreground text-xs">
                         {file.type === 'd' ? '-' : formatBytes(file.size)}

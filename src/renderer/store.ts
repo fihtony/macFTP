@@ -30,6 +30,12 @@ interface UpdateOptions {
   persist?: boolean;
 }
 
+interface AppSettings {
+  maxConcurrentDownloads: number;
+  defaultConflictResolution: 'overwrite' | 'rename' | 'prompt';
+  showHiddenFiles: boolean;
+}
+
 interface AppState {
   sites: Site[];
   addSite: (site: Site) => void;
@@ -59,6 +65,12 @@ interface AppState {
   cancelDownload: (id: string) => void;
   loadDownloads: () => Promise<void>;
   saveDownloads: () => Promise<void>;
+
+  // Settings
+  settings: AppSettings;
+  updateSettings: (settings: Partial<AppSettings>) => void;
+  loadSettings: () => Promise<void>;
+  saveSettings: () => void;
 
   // Connection progress
   connectionProgress: {
@@ -301,5 +313,56 @@ export const useStore = create<AppState>((set, get) => ({
   // Temporary preview file path (for cleanup on disconnect/quit)
   tempFilePath: null,
   setTempFilePath: (path) => set({ tempFilePath: path }),
+  
+  // Settings
+  settings: {
+    maxConcurrentDownloads: 3,
+    defaultConflictResolution: 'prompt',
+    showHiddenFiles: false
+  },
+  
+  updateSettings: (newSettings) => {
+    set((state) => ({
+      settings: { ...state.settings, ...newSettings }
+    }));
+    get().saveSettings();
+    
+    // If maxConcurrentDownloads changed, notify backend
+    if (newSettings.maxConcurrentDownloads !== undefined) {
+      const electron = (window as any).electronAPI;
+      if (electron?.updateMaxDownloads) {
+        electron.updateMaxDownloads(newSettings.maxConcurrentDownloads);
+      }
+    }
+  },
+  
+  loadSettings: async () => {
+    const electron = (window as any).electronAPI;
+    if (electron?.loadSettings) {
+      try {
+        const settings = await electron.loadSettings();
+        if (settings) {
+          set({ settings });
+          console.log('[Store] Loaded settings:', settings);
+          
+          // Update backend max downloads
+          if (electron?.updateMaxDownloads) {
+            electron.updateMaxDownloads(settings.maxConcurrentDownloads);
+          }
+        }
+      } catch (err) {
+        console.error('[Store] Failed to load settings:', err);
+      }
+    }
+  },
+  
+  saveSettings: () => {
+    const electron = (window as any).electronAPI;
+    const settings = get().settings;
+    console.log('[Store] Saving settings:', settings);
+    if (electron?.saveSettings) {
+      electron.saveSettings(settings);
+    }
+  }
 }));
 

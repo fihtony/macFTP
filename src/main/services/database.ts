@@ -1,6 +1,6 @@
 import ElectronStore from 'electron-store';
 import crypto from 'crypto';
-import { app } from 'electron';
+import { app, ipcMain } from 'electron';
 import path from 'path';
 import os from 'os';
 import * as keytar from 'keytar';
@@ -187,6 +187,11 @@ interface DownloadHistoryItem {
 interface StoreSchema {
   sites: Site[];
   downloadHistory: DownloadHistoryItem[];
+  appSettings: {
+    maxConcurrentDownloads: number;
+    defaultConflictResolution: 'overwrite' | 'rename' | 'prompt';
+    showHiddenFiles: boolean;
+  };
 }
 
 // Create store instance
@@ -389,3 +394,20 @@ export const loadAllDownloads = (): DownloadHistoryItem[] => {
   }
 };
 
+// Settings handlers
+ipcMain.handle('store:saveSettings', async (_event, settings: any) => {
+  console.log('[IPC] Saving settings:', settings);
+  (store as any).set('appSettings', settings);
+  return { success: true };
+});
+
+ipcMain.handle('store:loadSettings', async () => {
+  console.log('[IPC] Loading settings from database...');
+  const settings = (store as any).get('appSettings', {
+    maxConcurrentDownloads: 3,
+    defaultConflictResolution: 'prompt',
+    showHiddenFiles: false
+  });
+  console.log('[IPC] Loaded settings:', settings);
+  return settings;
+});

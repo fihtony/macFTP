@@ -44,7 +44,7 @@ const tempFiles = new Set<string>();
 
 let currentConnectionConfig: ConnectionConfig | null = null;
 
-const MAX_CONCURRENT_DOWNLOADS = 3;
+let MAX_CONCURRENT_DOWNLOADS = 3; // Can be updated via settings
 
 interface DownloadQueueItem {
   id: string;
@@ -1730,7 +1730,15 @@ ipcMain.handle('ftp:upload-folder', async (_event, { localPath, remotePath }: { 
     }
 });
 
-ipcMain.handle('ftp:download-folder', async (event, { remotePath, folderName, downloadId, defaultDownloadPath, duplicateAction, applyToAll }: { remotePath: string, folderName: string, downloadId: string, defaultDownloadPath?: string, duplicateAction?: 'overwrite' | 'rename' | 'skip', applyToAll?: boolean }) => {
+ipcMain.handle('ftp:download-folder', async (event, { remotePath, folderName, downloadId, defaultDownloadPath, duplicateAction, applyToAll, defaultConflictResolution }: { 
+  remotePath: string, 
+  folderName: string, 
+  downloadId: string, 
+  defaultDownloadPath?: string, 
+  duplicateAction?: 'overwrite' | 'rename' | 'skip', 
+  applyToAll?: boolean,
+  defaultConflictResolution?: 'overwrite' | 'rename' | 'prompt'
+}) => {
     try {
         if (!currentProtocol) {
             throw new Error('Not connected');
@@ -1788,6 +1796,16 @@ ipcMain.handle('ftp:download-folder', async (event, { remotePath, folderName, do
                         savedFolderPath = defaultPath;
                     } else { // rename
                         savedFolderPath = generateUniqueFileName(defaultDownloadPath, folderName);
+                    }
+                } else if (defaultConflictResolution && defaultConflictResolution !== 'prompt') {
+                    // Use global setting if not 'prompt'
+                    console.log('[Folder Download] Using global conflict resolution:', defaultConflictResolution);
+                    if (defaultConflictResolution === 'overwrite') {
+                        savedFolderPath = defaultPath;
+                        finalDuplicateAction = 'overwrite';
+                    } else { // rename
+                        savedFolderPath = generateUniqueFileName(defaultDownloadPath, folderName);
+                        finalDuplicateAction = 'rename';
                     }
                 } else {
                     // Prompt user for action
@@ -2455,3 +2473,24 @@ ipcMain.handle('ftp:chmod', async (event, { path, mode }: { path: string, mode: 
     }
 });
 
+// Settings handlers
+ipcMain.handle('settings:update-max-downloads', async (_event, maxDownloads: number) => {
+  console.log('[Settings] Updating max concurrent downloads to:', maxDownloads);
+  MAX_CONCURRENT_DOWNLOADS = Math.max(1, Math.min(10, maxDownloads));
+  return { success: true };
+});
+
+ipcMain.handle('shell:open-external', async (_event, url: string) => {
+  const { shell } = require('electron');
+  try {
+    await shell.openExternal(url);
+    return { success: true };
+  } catch (err: any) {
+    console.error('[Shell] Error opening external URL:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+export const registerFtpHandlers = () => {
+  console.log('[FTP Handlers] Registered');
+};
