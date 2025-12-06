@@ -29,6 +29,9 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
   const [confirmDialog, setConfirmDialog] = useState<{
     type: 'clear' | 'delete';
     id?: string;
+    fileName?: string;
+    status?: string;
+    isFolder?: boolean;
   } | null>(null);
   
   const activeListRef = useRef<HTMLDivElement>(null);
@@ -178,7 +181,14 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
           <button
             onClick={(e) => {
               e.stopPropagation();
-              setConfirmDialog({ type: 'delete', id: download.id });
+              console.log('[User Action] Delete download record from history:', { id: download.id, fileName: download.fileName, status: download.status });
+              setConfirmDialog({ 
+                type: 'delete', 
+                id: download.id,
+                fileName: download.fileName,
+                status: download.status,
+                isFolder: download.isFolder
+              });
             }}
             className="p-1 hover:bg-destructive/20 rounded transition-colors opacity-0 group-hover:opacity-100 flex-shrink-0"
             title="Delete this record"
@@ -212,7 +222,7 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
             <div className="flex-1 min-w-0">
               <div className="flex items-center justify-between mb-1 gap-2">
                 <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                  <p className="text-sm font-medium truncate">{download.fileName}</p>
+                <p className="text-sm font-medium truncate">{download.fileName}</p>
                   {download.isFolder && (
                     <span className="px-1.5 py-0.5 text-[9px] font-medium bg-blue-500/20 text-blue-400 rounded flex-shrink-0">
                       Folder
@@ -244,10 +254,10 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
                         }}
                       />
                     ) : (
-                      <div
-                        className="h-full bg-primary transition-all duration-300"
-                        style={{ width: `${progress}%` }}
-                      />
+                    <div
+                      className="h-full bg-primary transition-all duration-300"
+                      style={{ width: `${progress}%` }}
+                    />
                     )}
                   </div>
                   <div className="flex items-center justify-between text-[11px] text-muted-foreground mt-1">
@@ -317,7 +327,10 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
             <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
               {(download.status === 'downloading' || download.status === 'queued') && !isCancelling && (
                 <button
-                  onClick={() => onCancel(download.id)}
+                  onClick={() => {
+                    console.log('[User Action] Cancel download from DownloadManager:', { id: download.id, fileName: download.fileName, isFolder: download.isFolder });
+                    onCancel(download.id);
+                  }}
                   className="p-1.5 rounded transition-colors hover:bg-accent"
                   title="Cancel"
                 >
@@ -331,7 +344,10 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
               )}
               {!isActive && (
                 <button
-                  onClick={() => onRemove(download.id)}
+                  onClick={() => {
+                    console.log('[User Action] Remove download from DownloadManager:', { id: download.id, fileName: download.fileName, status: download.status });
+                    onRemove(download.id);
+                  }}
                   className="p-1.5 hover:bg-accent rounded transition-colors"
                   title="Remove"
                 >
@@ -383,7 +399,7 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
         )}
 
         <div ref={activeListRef} className="custom-scrollbar flex-1 overflow-y-auto">
-          {!showHistory && activeDownloads.map(download => renderDownloadItem(download))}
+        {!showHistory && activeDownloads.map(download => renderDownloadItem(download))}
         </div>
 
         {/* History Section */}
@@ -395,7 +411,10 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
                   <h3 className="text-sm font-medium text-muted-foreground">History</h3>
                   {onClearHistory && (
                     <button
-                      onClick={() => setConfirmDialog({ type: 'clear' })}
+                      onClick={() => {
+                        console.log('[User Action] Clear history requested from DownloadManager');
+                        setConfirmDialog({ type: 'clear' });
+                      }}
                       className="px-2 py-1 text-xs bg-secondary hover:bg-secondary/80 rounded transition-colors border border-border"
                       title="Clear all history"
                     >
@@ -436,7 +455,15 @@ const DownloadManager: React.FC<DownloadManagerProps> = ({
           message={
             confirmDialog.type === 'clear'
               ? 'Are you sure you want to clear all download history? This action cannot be undone.'
-              : 'Are you sure you want to delete this download record? The downloaded file will not be deleted.'
+              : (() => {
+                  const statusText = confirmDialog.status === 'completed' ? 'Downloaded' :
+                                    confirmDialog.status === 'failed' ? 'Failed' :
+                                    confirmDialog.status === 'cancelled' ? 'Cancelled' :
+                                    confirmDialog.status || 'Unknown';
+                  const itemType = confirmDialog.isFolder ? 'Folder' : 'File';
+                  const itemName = confirmDialog.fileName || 'Unknown';
+                  return `Are you sure you want to delete this download record?\n\n${itemType}: ${itemName}\nStatus: ${statusText}\n\nThe downloaded ${confirmDialog.isFolder ? 'folder' : 'file'} will not be deleted.`;
+                })()
           }
           onConfirm={() => {
             if (confirmDialog.type === 'clear' && onClearHistory) {

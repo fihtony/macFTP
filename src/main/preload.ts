@@ -7,7 +7,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   download: (remotePath: string, fileName: string, downloadId?: string, totalSize?: number, defaultDownloadPath?: string, duplicateAction?: 'overwrite' | 'rename' | 'skip', applyToAll?: boolean, defaultConflictResolution?: 'overwrite' | 'rename' | 'prompt') =>
     ipcRenderer.invoke('ftp:download', { remotePath, fileName, downloadId, totalSize, defaultDownloadPath, duplicateAction, applyToAll, defaultConflictResolution }),
   saveTempFile: (tempPath: string, fileName: string) => ipcRenderer.invoke('ftp:save-temp-file', { tempPath, fileName }),
-  upload: (localPath: string, remotePath: string) => ipcRenderer.invoke('ftp:upload', { localPath, remotePath }),
+  upload: (localPath: string, remotePath: string, uploadId?: string, defaultConflictResolution?: 'overwrite' | 'rename' | 'prompt') => 
+    ipcRenderer.invoke('ftp:upload', { localPath, remotePath, uploadId, defaultConflictResolution }),
+  checkRemoteExists: (remotePath: string) => ipcRenderer.invoke('ftp:check-exists', remotePath),
   chmod: (path: string, mode: string) => ipcRenderer.invoke('ftp:chmod', { path, mode }),
   quickView: (remotePath: string) => ipcRenderer.invoke('ftp:quick-view', remotePath),
   previewFile: (remotePath: string, fileName: string) => ipcRenderer.invoke('ftp:preview-file', { remotePath, fileName }),
@@ -41,7 +43,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteEntry: (targetPath: string, isDirectory: boolean) => ipcRenderer.invoke('ftp:delete-entry', { targetPath, isDirectory }),
   createDirectory: (targetPath: string) => ipcRenderer.invoke('ftp:create-directory', { targetPath }),
   getPathInfo: (targetPath: string) => ipcRenderer.invoke('fs:path-info', { targetPath }),
-  uploadFolder: (localPath: string, remotePath: string) => ipcRenderer.invoke('ftp:upload-folder', { localPath, remotePath }),
+  uploadFolder: (localPath: string, remotePath: string, defaultConflictResolution?: 'overwrite' | 'rename' | 'prompt') => 
+    ipcRenderer.invoke('ftp:upload-folder', { localPath, remotePath, defaultConflictResolution }),
   downloadFolder: (remotePath: string, folderName: string, downloadId: string, defaultDownloadPath?: string, duplicateAction?: 'overwrite' | 'rename' | 'skip', applyToAll?: boolean, defaultConflictResolution?: 'overwrite' | 'rename' | 'prompt') => 
     ipcRenderer.invoke('ftp:download-folder', { remotePath, folderName, downloadId, defaultDownloadPath, duplicateAction, applyToAll, defaultConflictResolution }),
   cancelDownloadFolder: (downloadId: string) => ipcRenderer.invoke('download-folder:cancel', { downloadId }),

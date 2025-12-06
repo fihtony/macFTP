@@ -1,6 +1,30 @@
 import { create } from 'zustand';
 import { DownloadItem } from './components/DownloadProgressDialog';
 
+// Track previous download stats to avoid duplicate logs
+let lastDownloadStats = { active: 0, queued: 0, downloading: 0 };
+
+// Helper function to log download stats only when counts change
+const logDownloadStatsIfChanged = (downloads: DownloadItem[]) => {
+  const activeCount = downloads.filter(d => d.status === 'queued' || d.status === 'downloading').length;
+  const queuedCount = downloads.filter(d => d.status === 'queued').length;
+  const downloadingCount = downloads.filter(d => d.status === 'downloading').length;
+  
+  // Only log if any count changed
+  if (activeCount !== lastDownloadStats.active || 
+      queuedCount !== lastDownloadStats.queued || 
+      downloadingCount !== lastDownloadStats.downloading) {
+    // Only show "Downloading" if it's > 0 or if it changed from > 0
+    const showDownloading = downloadingCount > 0 || lastDownloadStats.downloading > 0;
+    if (showDownloading) {
+      console.log('[Download Stats] Active:', activeCount, 'Queued:', queuedCount, 'Downloading:', downloadingCount);
+    } else {
+      console.log('[Download Stats] Active:', activeCount, 'Queued:', queuedCount);
+    }
+    lastDownloadStats = { active: activeCount, queued: queuedCount, downloading: downloadingCount };
+  }
+};
+
 export interface Site {
   id: string;
   name: string;
@@ -168,39 +192,127 @@ export const useStore = create<AppState>((set, get) => ({
   // Download management
   downloads: [],
   addDownload: (download) => {
-    set((state) => ({ downloads: [...state.downloads, download] }));
+    set((state) => {
+      const exists = state.downloads.some(d => d.id === download.id);
+      const isActive = download.status === 'queued' || download.status === 'downloading';
+      const isHistory = download.status === 'completed' || download.status === 'failed' || download.status === 'cancelled';
+      
+      if (exists) {
+        const existing = state.downloads.find(d => d.id === download.id);
+        const wasActive = existing?.status === 'queued' || existing?.status === 'downloading';
+        const wasHistory = existing?.status === 'completed' || existing?.status === 'failed' || existing?.status === 'cancelled';
+        
+        // Log if moving between active and history
+        if (wasActive && !isActive) {
+          console.log('[Download] Removed from active list:', { id: download.id, fileName: download.fileName, status: download.status });
+        }
+        if (!wasHistory && isHistory) {
+          console.log('[Download] Added to history:', { id: download.id, fileName: download.fileName, status: download.status });
+        }
+        if (!wasActive && isActive) {
+          console.log('[Download] Added to active list:', { id: download.id, fileName: download.fileName, status: download.status });
+        }
+      } else {
+        if (isActive) {
+          console.log('[Download] Added to active list:', { id: download.id, fileName: download.fileName, status: download.status, isFolder: download.isFolder });
+        } else if (isHistory) {
+          console.log('[Download] Added to history:', { id: download.id, fileName: download.fileName, status: download.status, isFolder: download.isFolder });
+        }
+      }
+      
+      const newDownloads = exists
+        ? state.downloads.map(d => d.id === download.id ? { ...d, ...download } : d)
+        : [...state.downloads, download];
+      
+      // Log stats only if counts changed
+      logDownloadStatsIfChanged(newDownloads);
+      
+      return { downloads: newDownloads };
+    });
     get().saveDownloads(); // Auto-save
   },
   updateDownload: (id, updates, options) => {
-    set((state) => ({
-      downloads: state.downloads.map(d => d.id === id ? { ...d, ...updates } : d)
-    }));
+    set((state) => {
+      const download = state.downloads.find(d => d.id === id);
+      if (!download) return { downloads: state.downloads };
+      
+      const wasActive = download.status === 'queued' || download.status === 'downloading';
+      const wasHistory = download.status === 'completed' || download.status === 'failed' || download.status === 'cancelled';
+      
+      const newDownloads = state.downloads.map(d => d.id === id ? { ...d, ...updates } : d);
+      const updated = newDownloads.find(d => d.id === id)!;
+      
+      const isActive = updated.status === 'queued' || updated.status === 'downloading';
+      const isHistory = updated.status === 'completed' || updated.status === 'failed' || updated.status === 'cancelled';
+      
+      // Log status changes
+      if (updates.status && updates.status !== download.status) {
+        // Moving from active to history
+        if (wasActive && !isActive) {
+          console.log('[Download] Removed from active list:', { id, fileName: updated.fileName, oldStatus: download.status, newStatus: updates.status });
+        }
+        // Moving to history
+        if (!wasHistory && isHistory) {
+          console.log('[Download] Added to history:', { id, fileName: updated.fileName, status: updates.status });
+        }
+        // Moving to active
+        if (!wasActive && isActive) {
+          console.log('[Download] Added to active list:', { id, fileName: updated.fileName, status: updates.status });
+        }
+      }
+      
+      // Log stats only when status changes (not on every progress update)
+      if (updates.status && updates.status !== download.status) {
+        logDownloadStatsIfChanged(newDownloads);
+      }
+      
+      return { downloads: newDownloads };
+    });
     if (options?.persist === false) {
       return;
     }
     get().saveDownloads(); // Auto-save
   },
   removeDownload: (id) => {
-    set((state) => ({
-      downloads: state.downloads.filter(d => d.id !== id)
-    }));
+    set((state) => {
+      const download = state.downloads.find(d => d.id === id);
+      if (download) {
+        const isActive = download.status === 'queued' || download.status === 'downloading';
+        const isHistory = download.status === 'completed' || download.status === 'failed' || download.status === 'cancelled';
+        
+        if (isActive) {
+          console.log('[Download] Removed from active list:', { id, fileName: download.fileName, status: download.status });
+        } else if (isHistory) {
+          console.log('[Download] Removed from history:', { id, fileName: download.fileName, status: download.status });
+        }
+      }
+      
+      const newDownloads = state.downloads.filter(d => d.id !== id);
+      
+      // Log stats only if counts changed
+      logDownloadStatsIfChanged(newDownloads);
+      
+      return { downloads: newDownloads };
+    });
     get().saveDownloads(); // Auto-save
   },
   cancelDownload: (id) => {
     const electron = (window as any).electronAPI;
     const download = get().downloads.find(d => d.id === id);
     
+    if (download) {
+      console.log('[User Action] Cancel download:', { id, fileName: download.fileName, isFolder: download.isFolder, status: download.status });
+    }
+    
     if (download?.isFolder) {
       // Use folder-specific cancel
       if (electron?.cancelDownloadFolder) {
-        console.log('[Store] Cancelling folder download:', id);
         electron.cancelDownloadFolder(id);
       }
     } else {
       // Use regular file cancel
-      if (electron?.cancelDownload) {
-        console.log('[Store] Cancelling file download:', id);
-        electron.cancelDownload(id);
+    if (electron?.cancelDownload) {
+      electron.cancelDownload(id);
       }
     }
     
@@ -223,11 +335,24 @@ export const useStore = create<AppState>((set, get) => ({
     // Don't save yet - wait for backend confirmation
   },
   clearHistory: () => {
-    set((state) => ({
-      downloads: state.downloads.filter(d => 
+    set((state) => {
+      const historyDownloads = state.downloads.filter(d => 
+        d.status === 'completed' || d.status === 'failed' || d.status === 'cancelled'
+      );
+      console.log('[User Action] Clear download history:', { count: historyDownloads.length });
+      historyDownloads.forEach(d => {
+        console.log('[Download] Removed from history:', { id: d.id, fileName: d.fileName, status: d.status });
+      });
+      
+      const newDownloads = state.downloads.filter(d => 
         d.status === 'queued' || d.status === 'downloading'
-      )
-    }));
+      );
+      
+      // Log stats only if counts changed
+      logDownloadStatsIfChanged(newDownloads);
+      
+      return { downloads: newDownloads };
+    });
     get().saveDownloads(); // Auto-save
   },
   loadDownloads: async () => {
@@ -255,11 +380,20 @@ export const useStore = create<AppState>((set, get) => ({
           }
           return d;
         });
+
+        // De-duplicate by id (keep the last occurrence)
+        const uniqueDownloads = Array.from(
+          cleanedDownloads.reduce((map: Map<string, any>, d: any) => {
+            map.set(d.id, d);
+            return map;
+          }, new Map<string, any>()).values()
+        );
         
-        set({ downloads: cleanedDownloads });
+        set({ downloads: uniqueDownloads });
         
         // Save the cleaned downloads back to database
-        if (cleanedDownloads.some((d: any, i: number) => d !== result.downloads[i])) {
+        if (cleanedDownloads.length !== uniqueDownloads.length ||
+            cleanedDownloads.some((d: any, i: number) => d !== result.downloads[i])) {
           get().saveDownloads();
         }
       } else {

@@ -54,7 +54,7 @@ const Sidebar = () => {
   const handleConnect = async (site: Site, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     
-    console.log('Connecting to', site.name);
+    console.log('[User Action] Connect to site:', { siteName: site.name, host: site.host, protocol: site.protocol });
     const electron = (window as any).electronAPI;
     if (!electron) {
       alert('Electron API not available');
@@ -72,6 +72,7 @@ const Sidebar = () => {
       const result = await electron.connect(site);
       
       if (result.success) {
+        console.log('[Success] Connected to site:', { siteName: site.name, host: site.host });
         useStore.getState().setConnected(true);
         useStore.getState().setCurrentSite(site); // Save current site
         // Navigate to initial path if specified, otherwise use root
@@ -89,9 +90,11 @@ const Sidebar = () => {
           }
         }
       } else {
+        console.error('[Error] Connection failed:', { siteName: site.name, host: site.host, error: result.error });
         alert('Connection failed: ' + result.error);
       }
     } catch (err: any) {
+      console.error('[Error] Connection exception:', { siteName: site.name, host: site.host, error: err.message });
       alert('Connection error: ' + err.message);
     } finally {
       // Hide connection progress dialog
@@ -106,6 +109,7 @@ const Sidebar = () => {
   };
 
   const handleDisconnect = async () => {
+    console.log('[User Action] Disconnect requested');
     // Check if there are active downloads
     const downloads = useStore.getState().downloads;
     const activeDownloads = downloads.filter(d => 
@@ -113,6 +117,7 @@ const Sidebar = () => {
     );
     
     if (activeDownloads.length > 0) {
+      console.log('[Warning] Disconnect with active downloads:', { activeDownloadCount: activeDownloads.length });
       // Show confirmation dialog
       setShowDisconnectConfirm(true);
       return;
@@ -125,33 +130,49 @@ const Sidebar = () => {
   const performDisconnect = async () => {
     const electron = (window as any).electronAPI;
     if (electron) {
-      // Cancel all active downloads first
+      // Get count of active downloads before disconnect
       const downloads = useStore.getState().downloads;
       const activeDownloads = downloads.filter(d => 
         d.status === 'downloading' || d.status === 'queued'
       );
+      const activeCount = activeDownloads.length;
       
-      // Mark all active downloads as failed
-      activeDownloads.forEach(download => {
-        useStore.getState().updateDownload(download.id, {
-          status: 'failed',
-          error: 'Connection terminated by user',
-          downloadedSize: 0,
-          speed: undefined,
-          eta: undefined,
-          endTime: Date.now()
-        });
-      });
+      if (activeCount > 0) {
+        console.log('[Disconnect] Terminating active downloads:', { count: activeCount });
+      }
       
       // Close any open previews and clear temp file path
       useStore.getState().setTempFilePath(null);
       
-      // Disconnect will automatically clean up all temp files
+      // Disconnect will cancel all downloads and clean up all temp files
+      // Backend handles all cancellations and sends failure notifications
       await electron.disconnect();
+      console.log('[Success] Disconnected from site');
       useStore.getState().setConnected(false);
       useStore.getState().setCurrentSite(null); // Clear current site
       useStore.getState().setRemoteFiles([]);
       useStore.getState().setCurrentPath('/');
+      
+      // Wait for backend to send all failure notifications, then show toast
+      if (activeCount > 0) {
+        setTimeout(() => {
+          // Check how many downloads actually failed
+          const currentDownloads = useStore.getState().downloads;
+          const failedCount = currentDownloads.filter(d => 
+            d.status === 'failed' && 
+            d.error === 'Connection terminated by user' &&
+            d.endTime && (Date.now() - d.endTime < 2000) // Failed within last 2 seconds
+          ).length;
+          
+          if (failedCount > 0) {
+            const message = `${failedCount} download task${failedCount !== 1 ? 's' : ''} failed due to connection terminated`;
+            // Use window event to show toast (App.tsx will handle it)
+            window.dispatchEvent(new CustomEvent('show-toast', { 
+              detail: { message, type: 'error' } 
+            }));
+          }
+        }, 300); // Wait 300ms for all notifications to arrive
+      }
     }
   };
 
@@ -184,6 +205,7 @@ const Sidebar = () => {
 
   const confirmDeleteSite = () => {
     if (siteToDelete) {
+      console.log('[User Action] Delete site:', { siteName: siteToDelete.name, siteId: siteToDelete.id });
       removeSite(siteToDelete.id);
       setSiteToDelete(null);
     }
@@ -283,52 +305,52 @@ const Sidebar = () => {
         />
       )}
 
-      <div className="h-full w-full bg-secondary/30 flex flex-col">
-        <div className="p-4 border-b border-border flex items-center justify-between">
-          <span className="font-semibold text-sm uppercase tracking-wider text-muted-foreground">Sites</span>
-          <button 
+    <div className="h-full w-full bg-secondary/30 flex flex-col">
+      <div className="p-4 border-b border-border flex items-center justify-between">
+        <span className="font-semibold text-sm uppercase tracking-wider text-muted-foreground">Sites</span>
+        <button 
             onClick={handleAdd} 
-            className="p-1 hover:bg-accent rounded"
+          className="p-1 hover:bg-accent rounded"
             title="Add new site"
-          >
+        >
             <Plus size={16} />
-          </button>
-        </div>
+        </button>
+      </div>
 
         <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
           {sites.length === 0 && !showModal && (
             <div className="text-center p-4 text-xs text-muted-foreground">
-              No sites saved. <br/><br/>
-              <strong>Demo Server:</strong><br/>
-              Host: test.rebex.net<br/>
-              Port: 22<br/>
-              User: demo<br/>
-              Pass: password
+                No sites saved. <br/><br/>
+                <strong>Demo Server:</strong><br/>
+                Host: test.rebex.net<br/>
+                Port: 22<br/>
+                User: demo<br/>
+                Pass: password
             </div>
-          )}
+        )}
 
-          {Object.entries(groupedSites).map(([group, groupSites]) => (
+        {Object.entries(groupedSites).map(([group, groupSites]) => (
             <div key={group} className="mb-2">
-              <div 
-                className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-muted-foreground cursor-pointer hover:text-foreground transition-colors"
-                onClick={() => toggleGroup(group)}
-              >
-                {expandedGroups[group] ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                <FolderOpen size={12} />
-                <span>{group}</span>
-              </div>
-              
-              {expandedGroups[group] && (
-                <div className="pl-2 mt-1 space-y-1">
+                <div 
+                    className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-muted-foreground cursor-pointer hover:text-foreground transition-colors"
+                    onClick={() => toggleGroup(group)}
+                >
+                    {expandedGroups[group] ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                    <FolderOpen size={12} />
+                    <span>{group}</span>
+                </div>
+                
+                {expandedGroups[group] && (
+                    <div className="pl-2 mt-1 space-y-1">
                   {groupSites.map(site => {
                     const connected = isSiteConnected(site);
                     const hasSshKey = usesSshKey(site);
                     const IconComponent = site.protocol === 'sftp' ? Lock : Network;
                     
                     return (
-                      <div 
-                        key={site.id} 
-                        className={`
+                            <div 
+                              key={site.id} 
+                              className={`
                           group relative p-2.5 rounded border transition-colors cursor-pointer
                           ${connected 
                             ? 'bg-primary/10 border-primary/30' 
@@ -352,7 +374,7 @@ const Sidebar = () => {
                           />
                           <div className="flex flex-col overflow-hidden min-w-0 flex-1">
                             <div className="flex items-center justify-between gap-2">
-                              <span className="text-sm font-medium truncate">{site.name}</span>
+                                    <span className="text-sm font-medium truncate">{site.name}</span>
                               {hasSshKey && (
                                 <span className="text-[9px] px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded border border-blue-500/30 flex-shrink-0 ml-auto">
                                   SSH
@@ -360,23 +382,23 @@ const Sidebar = () => {
                               )}
                             </div>
                             <div className="flex items-center justify-between gap-2">
-                              <span className="text-[10px] text-muted-foreground truncate">{site.user}@{site.host}</span>
+                                    <span className="text-[10px] text-muted-foreground truncate">{site.user}@{site.host}</span>
                               {connected && (
                                 <span className="text-[9px] font-medium text-green-500 flex-shrink-0">
                                   Connected
                                 </span>
                               )}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
+                                  </div>
+                                </div>
+                                </div>
+                              </div>
                     );
                   })}
-                </div>
-              )}
+                    </div>
+                )}
             </div>
-          ))}
-        </div>
+        ))}
+      </div>
       
       {/* Connection Status & Settings */}
       <div className="border-t border-border">
@@ -404,32 +426,40 @@ const Sidebar = () => {
           {showSettings && (
             <div className="mt-3 p-3 bg-background/50 rounded text-xs space-y-2 border border-border">
               {/* Max Concurrent Downloads */}
-              <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between">
                 <label className="text-muted-foreground">Max Concurrent Downloads:</label>
                 <select
                   value={settings.maxConcurrentDownloads}
-                  onChange={(e) => updateSettings({ maxConcurrentDownloads: parseInt(e.target.value) })}
+                  onChange={(e) => {
+                    const newValue = parseInt(e.target.value);
+                    console.log('[User Action] Change setting: maxConcurrentDownloads', { oldValue: settings.maxConcurrentDownloads, newValue });
+                    updateSettings({ maxConcurrentDownloads: newValue });
+                  }}
                   className="px-2 py-0.5 bg-input border border-border rounded text-xs w-16"
                 >
                   {[1, 2, 3, 4, 5].map(num => (
                     <option key={num} value={num}>{num}</option>
                   ))}
                 </select>
-              </div>
+                </div>
               
               {/* File Conflict Resolution */}
-              <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between">
                 <label className="text-muted-foreground">When File Exists:</label>
                 <select
                   value={settings.defaultConflictResolution}
-                  onChange={(e) => updateSettings({ defaultConflictResolution: e.target.value as any })}
+                  onChange={(e) => {
+                    const newValue = e.target.value as any;
+                    console.log('[User Action] Change setting: defaultConflictResolution', { oldValue: settings.defaultConflictResolution, newValue });
+                    updateSettings({ defaultConflictResolution: newValue });
+                  }}
                   className="px-2 py-0.5 bg-input border border-border rounded text-xs"
                 >
                   <option value="prompt">Ask</option>
                   <option value="rename">Rename</option>
                   <option value="overwrite">Overwrite</option>
                 </select>
-              </div>
+                </div>
               
               {/* Show Hidden Files */}
               <div className="flex items-center justify-between">
@@ -437,7 +467,11 @@ const Sidebar = () => {
                 <input
                   type="checkbox"
                   checked={settings.showHiddenFiles}
-                  onChange={(e) => updateSettings({ showHiddenFiles: e.target.checked })}
+                  onChange={(e) => {
+                    const newValue = e.target.checked;
+                    console.log('[User Action] Change setting: showHiddenFiles', { oldValue: settings.showHiddenFiles, newValue });
+                    updateSettings({ showHiddenFiles: newValue });
+                  }}
                   className="w-4 h-4"
                 />
               </div>

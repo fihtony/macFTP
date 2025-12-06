@@ -165,14 +165,14 @@ const DownloadProgressDialog: React.FC<DownloadProgressDialogProps> = ({
                 animation: 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite'
               }} />
             ) : (
-              <div
-                className={`h-full transition-all duration-300 ${
+            <div
+              className={`h-full transition-all duration-300 ${
                   isCompleted ? 'bg-green-500' : 
                   isCancelled || isFailed ? 'bg-muted' : 
                   'bg-primary'
-                }`}
+              }`}
                 style={{ width: isCancelled || isFailed ? '0%' : `${progress}%` }}
-              />
+            />
             )}
           </div>
         </div>

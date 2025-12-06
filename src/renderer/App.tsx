@@ -16,6 +16,8 @@ type DownloadProgressPayload = {
   speed?: number;
   eta?: number;
   startTime?: number;
+  endTime?: number;
+  error?: string;
 };
 
 function App() {
@@ -39,6 +41,7 @@ function App() {
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' | 'warning' } | null>(null);
   const processedCancellations = React.useRef<Set<string>>(new Set());
   const completedDownloadsRef = React.useRef<Set<string>>(new Set());
+  const disconnectFailedDownloads = React.useRef<Set<string>>(new Set()); // Track downloads failed due to disconnect
   
   // Panel widths - use store for sidebar width so FileExplorer can access it
   const sidebarWidth = useStore((state) => state.sidebarWidth);
@@ -67,6 +70,17 @@ function App() {
       // Default to dark mode
       setTheme('dark');
     }
+    
+    // Listen for toast events from other components
+    const handleToastEvent = (event: CustomEvent) => {
+      setToast({ message: event.detail.message, type: event.detail.type });
+    };
+    
+    window.addEventListener('show-toast', handleToastEvent as EventListener);
+    
+    return () => {
+      window.removeEventListener('show-toast', handleToastEvent as EventListener);
+    };
   }, [loadSites, loadDownloads, setTheme]);
 
   useEffect(() => {
@@ -84,6 +98,11 @@ function App() {
         console.log('[App] Ignoring update for already finished download:', payload.id, 'current status:', currentDownload.status, 'payload status:', payload.status);
         return;
       }
+      
+      // Track downloads failed due to disconnect (to suppress individual toasts)
+      if (payload.status === 'failed' && (payload as any).error === 'Connection terminated by user') {
+        disconnectFailedDownloads.current.add(payload.id);
+      }
 
       // Check if this download is being cancelled - use ref for immediate access
       if (cancellingDownloadsRef.current.has(payload.id)) {
@@ -96,6 +115,7 @@ function App() {
             downloadedSize: 0,
             speed: undefined,
             eta: undefined,
+            error: payload.error || (payload as any).error,
             endTime: Date.now() 
           }, { persist: true });
         }
@@ -120,6 +140,9 @@ function App() {
       }
       if (payload.endTime) {
         updates.endTime = payload.endTime;
+      }
+      if (payload.error !== undefined) {
+        updates.error = payload.error;
       }
       if ((payload as any).actualFileName) {
         updates.fileName = (payload as any).actualFileName;
@@ -169,10 +192,14 @@ function App() {
             : `Download cancelled: ${download.fileName}`;
           setToast({ message, type: 'warning' });
         } else if (download.status === 'failed') {
-          const message = download.isFolder 
-            ? `Folder download failed: ${download.fileName}` 
-            : `Download failed: ${download.fileName}`;
-          setToast({ message, type: 'error' });
+          // Don't show individual toast for disconnect-related failures
+          // A summary toast will be shown by Sidebar.tsx
+          if (!disconnectFailedDownloads.current.has(download.id)) {
+            const message = download.isFolder 
+              ? `Folder download failed: ${download.fileName}` 
+              : `Download failed: ${download.fileName}`;
+            setToast({ message, type: 'error' });
+          }
         }
         
         // Auto-dismiss dialog if this download is selected

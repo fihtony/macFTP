@@ -37,7 +37,7 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           </div>
           <div className="flex-1">
             <h3 className="text-lg font-semibold mb-2">{title}</h3>
-            <p className="text-sm text-muted-foreground">{message}</p>
+            <p className="text-sm text-muted-foreground whitespace-pre-line">{message}</p>
           </div>
         </div>
         
