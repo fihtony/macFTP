@@ -96,7 +96,10 @@ const uploadFileViaSftp = async (
   remotePath: string,
   fileSize: number,
   baseUploaded: number,
-  startedAt: number
+  startedAt: number,
+  totalBytes: number,
+  totalFiles: number,
+  completedFiles: number
 ) => {
   if (!sftpClient) throw new Error('SFTP client not initialized');
   const remoteDir = path.posix.dirname(remotePath);
@@ -108,18 +111,26 @@ const uploadFileViaSftp = async (
   let currentUploaded = 0;
 
   const emitProgress = () => {
+    // Check for cancellation during progress updates
+    if (controller.cancelRequested) {
+      console.log('[Upload] Cancellation detected during file upload, stopping:', { uploadId: controller.uploadId, file: path.posix.basename(remotePath) });
+      return; // Stop emitting progress if cancelled
+    }
+    
     const now = Date.now();
     const elapsedSeconds = Math.max((now - startedAt) / 1000, 0.001);
     notifyUploadProgress({
       uploadId: controller.uploadId,
       status: 'uploading',
-      totalBytes: fileSize,
-      uploadedBytes: baseUploaded + currentUploaded,
-      completedFiles: 0,
-      totalFiles: 1,
+      totalBytes: totalBytes, // Total bytes for all files
+      uploadedBytes: baseUploaded + currentUploaded, // Cumulative bytes uploaded
+      completedFiles: completedFiles, // Number of files completed so far
+      totalFiles: totalFiles, // Total number of files
       currentFile: path.posix.basename(remotePath),
-      currentFileUploaded: currentUploaded,
-      currentFileSize: fileSize,
+      currentFileUploaded: currentUploaded, // Bytes uploaded for current file
+      currentFileSize: fileSize, // Size of current file
+      currentFileLocalPath: localPath, // Local path for current file
+      currentFileRemotePath: remotePath, // Remote path for current file
       speed: (baseUploaded + currentUploaded) / elapsedSeconds
     });
   };
@@ -143,15 +154,17 @@ const uploadFileViaSftp = async (
     });
 
     localStream.on('data', (chunk: Buffer | string) => {
-      const chunkLength = typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length;
-      currentUploaded += chunkLength;
-      emitProgress();
-
+      // Check for cancellation first, before processing chunk
       if (controller.cancelRequested) {
+        console.log('[Upload] Cancellation detected in data stream (SFTP), stopping immediately:', { uploadId: controller.uploadId, file: path.posix.basename(remotePath) });
         cleanup();
         reject(createUploadAbortError('cancelled'));
         return;
       }
+      
+      const chunkLength = typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length;
+      currentUploaded += chunkLength;
+      emitProgress();
     });
 
     localStream.on('error', (err) => {
@@ -169,7 +182,10 @@ const uploadFileViaFtp = async (
   remotePath: string,
   fileSize: number,
   baseUploaded: number,
-  startedAt: number
+  startedAt: number,
+  totalBytes: number,
+  totalFiles: number,
+  completedFiles: number
 ) => {
   if (!ftpClient) throw new Error('FTP client not initialized');
   const remoteDir = path.posix.dirname(remotePath);
@@ -189,31 +205,43 @@ const uploadFileViaFtp = async (
     };
 
     const emitProgress = () => {
+      // Check for cancellation during progress updates
+      if (controller.cancelRequested) {
+        console.log('[Upload] Cancellation detected during file upload (FTP), stopping:', { uploadId: controller.uploadId, file: path.posix.basename(remotePath) });
+        return; // Stop emitting progress if cancelled
+      }
+      
       const now = Date.now();
       const elapsedSeconds = Math.max((now - startedAt) / 1000, 0.001);
       notifyUploadProgress({
         uploadId: controller.uploadId,
         status: 'uploading',
-        totalBytes: fileSize,
-        uploadedBytes: baseUploaded + currentUploaded,
-        completedFiles: 0,
-        totalFiles: 1,
+        totalBytes: totalBytes, // Total bytes for all files
+        uploadedBytes: baseUploaded + currentUploaded, // Cumulative bytes uploaded
+        completedFiles: completedFiles, // Number of files completed so far
+        totalFiles: totalFiles, // Total number of files
         currentFile: path.posix.basename(remotePath),
-        currentFileUploaded: currentUploaded,
-        currentFileSize: fileSize,
+        currentFileUploaded: currentUploaded, // Bytes uploaded for current file
+        currentFileSize: fileSize, // Size of current file
+        currentFileLocalPath: localPath, // Local path for current file
+        currentFileRemotePath: remotePath, // Remote path for current file
         speed: (baseUploaded + currentUploaded) / elapsedSeconds
       });
     };
 
     stream.on('data', (chunk: Buffer | string) => {
+      // Check for cancellation first, before processing chunk
+      if (controller.cancelRequested) {
+        console.log('[Upload] Cancellation detected in data stream (FTP), stopping immediately:', { uploadId: controller.uploadId, file: path.posix.basename(remotePath) });
+        cleanup();
+        stream.destroy();
+        reject(createUploadAbortError('cancelled'));
+        return;
+      }
+      
       const chunkLength = typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length;
       currentUploaded += chunkLength;
       emitProgress();
-      if (controller.cancelRequested) {
-        cleanup();
-        stream.destroy(createUploadAbortError('cancelled'));
-        return;
-      }
     });
 
     stream.on('error', (err) => {
@@ -291,7 +319,10 @@ const startFolderUpload = async (uploadId: string, localPath: string, remotePath
     let completedFiles = 0;
 
     for (const file of entries.files) {
-      if (controller.cancelRequested) throw createUploadAbortError('cancelled');
+      if (controller.cancelRequested) {
+        console.log('[Upload] Cancellation detected before starting file upload, stopping folder upload:', { uploadId, file: file.relativePath });
+        throw createUploadAbortError('cancelled');
+      }
 
       const remoteFilePath = path.posix.join(remotePath, file.relativePath).replace(/\\/g, '/');
       notifyUploadProgress({
@@ -304,19 +335,34 @@ const startFolderUpload = async (uploadId: string, localPath: string, remotePath
         currentFile: file.relativePath,
         currentFileSize: file.size,
         currentFileUploaded: 0,
+        currentFileLocalPath: file.localPath,
+        currentFileRemotePath: remoteFilePath,
         speed: uploadedBytes / Math.max((Date.now() - startedAt) / 1000, 0.001)
       });
 
-      if (currentProtocol === 'sftp') {
-        await uploadFileViaSftp(controller, file.localPath, remoteFilePath, file.size, uploadedBytes, startedAt);
-      } else if (currentProtocol === 'ftp') {
-        await uploadFileViaFtp(controller, file.localPath, remoteFilePath, file.size, uploadedBytes, startedAt);
-      } else {
-        throw new Error('Not connected');
+      try {
+        if (currentProtocol === 'sftp') {
+          await uploadFileViaSftp(controller, file.localPath, remoteFilePath, file.size, uploadedBytes, startedAt, entries.totalBytes, entries.totalFiles, completedFiles);
+        } else if (currentProtocol === 'ftp') {
+          await uploadFileViaFtp(controller, file.localPath, remoteFilePath, file.size, uploadedBytes, startedAt, entries.totalBytes, entries.totalFiles, completedFiles);
+        } else {
+          throw new Error('Not connected');
+        }
+        
+        // Only increment if upload completed successfully (not cancelled)
+        if (!controller.cancelRequested) {
+          uploadedBytes += file.size;
+          completedFiles += 1;
+        }
+      } catch (err: any) {
+        // If cancelled, stop the loop
+        if (controller.cancelRequested || err?.code === 'UPLOAD_CANCELLED') {
+          console.log('[Upload] File upload cancelled, stopping folder upload:', { uploadId, file: file.relativePath });
+          throw err; // Re-throw to exit the loop
+        }
+        // For other errors, continue with next file
+        throw err;
       }
-
-      uploadedBytes += file.size;
-      completedFiles += 1;
 
       notifyUploadProgress({
         uploadId,
@@ -328,6 +374,8 @@ const startFolderUpload = async (uploadId: string, localPath: string, remotePath
         currentFile: file.relativePath,
         currentFileUploaded: file.size,
         currentFileSize: file.size,
+        currentFileLocalPath: file.localPath,
+        currentFileRemotePath: remoteFilePath,
         speed: uploadedBytes / Math.max((Date.now() - startedAt) / 1000, 0.001)
       });
     }
@@ -337,7 +385,7 @@ const startFolderUpload = async (uploadId: string, localPath: string, remotePath
     if (finalStatus === 'completed') {
       console.log('[Success] Folder upload completed:', { uploadId, localPath, remotePath, totalFiles: entries.totalFiles, totalBytes: entries.totalBytes, elapsedSeconds });
     } else {
-      console.log('[Upload] Folder upload cancelled:', { uploadId, localPath, remotePath });
+      console.log('[Upload] Folder upload cancelled (confirmed):', { uploadId, localPath, remotePath, completedFiles, totalFiles: entries.totalFiles });
     }
     notifyUploadProgress({
       uploadId,
@@ -354,7 +402,7 @@ const startFolderUpload = async (uploadId: string, localPath: string, remotePath
   } catch (err: any) {
     const status: UploadStatus = controller.cancelRequested || err?.code === 'UPLOAD_CANCELLED' ? 'cancelled' : 'failed';
     if (status === 'cancelled') {
-      console.log('[Upload] Folder upload cancelled:', { uploadId, localPath, remotePath });
+      console.log('[Upload] Folder upload cancelled (exception caught):', { uploadId, localPath, remotePath, error: err.message });
     } else {
       console.error('[Error] Folder upload failed:', { uploadId, localPath, remotePath, error: err.message, code: err.code });
     }
@@ -377,19 +425,19 @@ const startFolderUpload = async (uploadId: string, localPath: string, remotePath
 // IPC Handlers
 // ------------------------
 
-ipcMain.handle('ftp:upload-folder', async (_event, {
+ipcMain.handle('ftp:upload-folder', async (event, {
   localPath,
   remotePath,
   defaultConflictResolution
 }: {
   localPath: string,
   remotePath: string,
-  defaultConflictResolution?: 'overwrite' | 'rename' | 'prompt' | 'skip'
+  defaultConflictResolution?: 'overwrite' | 'rename' | 'prompt'
 }) => {
   try {
     if (!currentProtocol || !currentConnectionConfig) throw new Error('Not connected');
 
-    const win = BrowserWindow.getFocusedWindow();
+    const win = BrowserWindow.fromWebContents(event.sender);
     if (!win) return { success: false, error: 'No window' };
 
     const folderName = path.basename(remotePath);
@@ -408,10 +456,14 @@ ipcMain.handle('ftp:upload-folder', async (_event, {
     }
 
     if (remoteExists) {
-      if (defaultConflictResolution && defaultConflictResolution !== 'prompt') {
-        if (defaultConflictResolution === 'skip') {
-          return { success: false, cancelled: true, skipped: true };
-        }
+      console.log('[Folder Upload] Duplicate folder detected:', { remotePath, folderName, defaultConflictResolution });
+      // Use the same duplicate handling logic as downloads
+      // Show dialog if defaultConflictResolution is 'prompt', undefined, or null
+      // Otherwise, handle automatically (overwrite or rename)
+      const shouldShowDialog = !defaultConflictResolution || defaultConflictResolution === 'prompt';
+      
+      if (!shouldShowDialog) {
+        console.log('[Folder Upload] Using automatic conflict resolution:', defaultConflictResolution);
         if (defaultConflictResolution === 'rename') {
           const parent = path.posix.dirname(remotePath);
           const base = path.posix.basename(remotePath);
@@ -443,19 +495,57 @@ ipcMain.handle('ftp:upload-folder', async (_event, {
         }
         // overwrite: continue
       } else {
+        // Show dialog when defaultConflictResolution is 'prompt', undefined, or null
+        console.log('[Folder Upload] Showing duplicate folder dialog');
         const result = await dialog.showMessageBox(win, {
           type: 'question',
-          buttons: ['Overwrite', 'Skip', 'Cancel'],
+          buttons: ['Overwrite', 'Rename', 'Skip', 'Cancel'],
+          defaultId: 1,
           title: 'Folder Already Exists',
-          message: `The folder \"${folderName}\" already exists on the server.`
+          message: `The folder "${folderName}" already exists on the server.`,
+          detail: `What would you like to do?`,
+          checkboxLabel: 'Apply to all similar cases',
+          checkboxChecked: false
         });
-        if (result.response === 1) { // Skip
-          return { success: false, cancelled: true, skipped: true };
-        }
-        if (result.response === 2) { // Cancel
+        
+        if (result.response === 3) { // Cancel
           return { success: false, cancelled: true };
         }
-        // Overwrite -> continue
+        
+        if (result.response === 2) { // Skip
+          return { success: false, cancelled: true, skipped: true };
+        }
+        
+        if (result.response === 1) { // Rename
+          const parent = path.posix.dirname(remotePath);
+          const base = path.posix.basename(remotePath);
+          let counter = 1;
+          let candidate = base;
+          while (true) {
+            const candidatePath = path.posix.join(parent, candidate);
+            const existsResult = await (async () => {
+              try {
+                if (currentProtocol === 'sftp' && sftpClient) {
+                  await sftpClient.stat(candidatePath);
+                  return true;
+                } else if (currentProtocol === 'ftp' && ftpClient) {
+                  await ftpClient.list(candidatePath);
+                  return true;
+                }
+              } catch {
+                return false;
+              }
+              return false;
+            })();
+            if (!existsResult) {
+              remotePath = candidatePath;
+              break;
+            }
+            candidate = `${base} (${counter})`;
+            counter++;
+          }
+        }
+        // Overwrite (response === 0): continue with original remotePath
       }
     }
 

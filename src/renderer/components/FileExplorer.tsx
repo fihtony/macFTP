@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { File, Folder, ArrowUp, RefreshCw, Download, Eye, Upload, Info, Trash2, FolderPlus, X, Save, Search, ZoomIn, ZoomOut, Loader2 } from 'lucide-react';
+import { File, Folder, ArrowUp, ArrowDown, RefreshCw, Download, Eye, Upload, Info, Trash2, FolderPlus, X, Save, Search, ZoomIn, ZoomOut, Loader2 } from 'lucide-react';
 import { useStore, RemoteFile } from '../store';
 import { DownloadItem } from './DownloadProgressDialog';
 import { format } from 'date-fns';
@@ -9,7 +9,8 @@ import { UploadProgressDialog } from './UploadProgressDialog';
 import { FileDialogs, DeleteDialogState } from './FileDialogs';
 import { FilePreview } from './FilePreview';
 import { formatBytes, formatDate, getFileType } from '../utils/formatters';
-import { UploadStatus, UploadTaskState, UPLOAD_FINAL_STATUSES, FolderUploadRequest } from '../types/upload';
+import { UploadStatus, UploadTaskState, UPLOAD_FINAL_STATUSES, FolderUploadRequest, UploadListItem, ConflictResolution } from '../types/upload';
+import { startUnifiedUpload } from '../services/UploadManager';
 
 const FileExplorer = () => {
   const { currentPath, remoteFiles, isLoading, setCurrentPath, setRemoteFiles, setLoading, isConnected, currentSite } = useStore();
@@ -24,10 +25,76 @@ const FileExplorer = () => {
   const setTempFilePath = useStore((state) => state.setTempFilePath);
   const settings = useStore((state) => state.settings);
   
+  // Sort state
+  const [sortColumn, setSortColumn] = useState<'name' | 'size' | 'modified' | null>(null);
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+  
   // Filter hidden files based on settings
   const visibleFiles = settings.showHiddenFiles 
     ? remoteFiles 
     : remoteFiles.filter(file => !file.name.startsWith('.'));
+
+  // Sort files based on sortColumn and sortDirection
+  const sortedFiles = useMemo(() => {
+    if (!sortColumn) return visibleFiles;
+    
+    const sorted = [...visibleFiles].sort((a, b) => {
+      let comparison = 0;
+      
+      if (sortColumn === 'name') {
+        // Sort folders first, then files, then alphabetically
+        if (a.type === 'd' && b.type !== 'd') return -1;
+        if (a.type !== 'd' && b.type === 'd') return 1;
+        comparison = a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+      } else if (sortColumn === 'size') {
+        // Folders have size -1 or 0, treat them as 0 for sorting
+        const sizeA = a.type === 'd' ? 0 : a.size;
+        const sizeB = b.type === 'd' ? 0 : b.size;
+        comparison = sizeA - sizeB;
+      } else if (sortColumn === 'modified') {
+        comparison = a.date - b.date;
+      }
+      
+      return sortDirection === 'asc' ? comparison : -comparison;
+    });
+    
+    return sorted;
+  }, [visibleFiles, sortColumn, sortDirection]);
+
+  // Handle column header click for sorting
+  // Cycle through: ascending -> descending -> no sorting
+  const handleSort = useCallback((column: 'name' | 'size' | 'modified') => {
+    if (sortColumn === column) {
+      // Clicking the same column: cycle through asc -> desc -> null
+      if (sortDirection === 'asc') {
+        // Currently ascending, change to descending
+        setSortDirection('desc');
+      } else {
+        // Currently descending, remove sorting
+        setSortColumn(null);
+        setSortDirection('asc');
+      }
+    } else {
+      // Clicking a different column: set to ascending
+      setSortColumn(column);
+      setSortDirection('asc');
+    }
+  }, [sortColumn, sortDirection]);
+
+  // Reset sort state when connecting to a new site
+  const prevSiteIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    // Only reset when connecting to a new site (site ID changes)
+    if (isConnected && currentSite?.id && prevSiteIdRef.current !== currentSite.id) {
+      setSortColumn(null);
+      setSortDirection('asc');
+      prevSiteIdRef.current = currentSite.id;
+    } else if (!isConnected) {
+      // Reset ref when disconnected
+      prevSiteIdRef.current = null;
+    }
+  }, [isConnected, currentSite?.id]);
+
   const [previewContent, setPreviewContent] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -58,6 +125,7 @@ const FileExplorer = () => {
   const completedFilesRef = useRef<number>(0);
   const totalBytesRef = useRef<number>(0);
   const cancelUploadsRef = useRef<boolean>(false);
+  const uploadCompletionToastShownRef = useRef<boolean>(false); // Track if completion toast has been shown
   const [duplicateAction, setDuplicateAction] = useState<'overwrite' | 'rename' | 'skip' | null>(null);
   const [applyToAll, setApplyToAll] = useState(false);
   const deleteDialogInitialState: DeleteDialogState = {
@@ -308,16 +376,40 @@ const FileExplorer = () => {
     }
   };
 
-  const initiateFolderUpload = useCallback(async (request: FolderUploadRequest) => {
-    console.log('[Upload] Starting folder upload:', { folderName: request.folderName, localPath: request.localPath, remotePath: request.remotePath, siteName: currentSite?.name });
+  // Wrapper for unified upload manager
+  const startUnifiedUploadWrapper = useCallback(async (items: Array<{ name: string; localPath: string; remotePath: string; size: number; isFolder: boolean }>) => {
     const electron = (window as any).electronAPI;
     if (!electron) return;
+    
+    await startUnifiedUpload(items, {
+      electron,
+      settings,
+      currentSite,
+      currentPath,
+      setActiveUpload,
+      setToast,
+      handleNavigate,
+      cancelUploadsRef,
+      uploadCompletionToastShownRef,
+      currentFileUploadIdRef
+    });
+  }, [settings, currentSite, currentPath, setToast, handleNavigate]);
+
+  const initiateFolderUpload = useCallback(async (request: FolderUploadRequest) => {
+    console.log('[Upload] Starting folder upload:', { folderName: request.folderName, localPath: request.localPath, remotePath: request.remotePath, siteName: currentSite?.name, defaultConflictResolution: settings.defaultConflictResolution });
+    const electron = (window as any).electronAPI;
+    if (!electron) return;
+    
+    // Reset cancellation flag for new upload session
+    cancelUploadsRef.current = false;
+    
     try {
       const response = await electron.uploadFolder(request.localPath, request.remotePath, settings.defaultConflictResolution);
       if (!response?.success) {
         console.error('[Error] Folder upload failed to start:', { folderName: request.folderName, error: response?.error });
         setToast({ message: `Failed to start folder upload: ${response?.error || 'Unknown error'}`, type: 'error' });
         setActiveUpload(null);
+        cancelUploadsRef.current = false; // Reset cancellation flag
         return;
       }
       setActiveUpload({
@@ -331,12 +423,18 @@ const FileExplorer = () => {
         currentFileUploaded: 0,
         currentFileSize: 0,
         speed: 0,
-        folderName: request.folderName
+        folderName: request.folderName,
+        isSingleUpload: false, // Explicitly mark as folder upload
+        siteName: currentSite?.name,
+        siteHost: currentSite?.host,
+        localPath: request.localPath,
+        remotePath: request.remotePath
       });
     } catch (err: any) {
       console.error('[Error] Folder upload exception:', { folderName: request.folderName, error: err.message });
       setToast({ message: `Failed to start folder upload: ${err.message || 'Unknown error'}`, type: 'error' });
       setActiveUpload(null);
+      cancelUploadsRef.current = false; // Reset cancellation flag
     }
   }, [setToast, currentSite]);
 
@@ -482,14 +580,24 @@ const FileExplorer = () => {
 
   const handleCancelUpload = async () => {
     if (!activeUpload || UPLOAD_FINAL_STATUSES.includes(activeUpload.status)) return;
-    console.log('[User Action] Cancel upload:', { uploadId: activeUpload.id, status: activeUpload.status, currentFile: activeUpload.currentFile });
+    console.log('[User Action] Cancel upload:', { uploadId: activeUpload.id, status: activeUpload.status, currentFile: activeUpload.currentFile, currentFileUploadId: currentFileUploadIdRef.current, isSingleUpload: activeUpload.isSingleUpload });
     cancelUploadsRef.current = true;
     setActiveUpload((prev) => (prev ? { ...prev, cancelRequested: true } : prev));
     const electron = (window as any).electronAPI;
     if (!electron) return;
-    const targetId = currentFileUploadIdRef.current || activeUpload.id;
+    
+    // For folder uploads (isSingleUpload === false), always use activeUpload.id (which is the folder uploadId)
+    // For single/multiple file uploads, try to cancel the current file's uploadId first, fallback to activeUpload.id
+    const isFolderUpload = activeUpload.isSingleUpload === false;
+    const targetId = isFolderUpload ? activeUpload.id : (currentFileUploadIdRef.current || activeUpload.id);
     if (targetId) {
-      await electron.cancelUpload(targetId);
+      try {
+        await electron.cancelUpload(targetId);
+      } catch (err: any) {
+        // If cancellation fails (e.g., uploadId not found), that's okay
+        // The cancelRequested flag is already set, so the upload loop will stop
+        console.log('[Upload] Cancel request for uploadId not found (may have already completed):', { uploadId: targetId, error: err.message });
+      }
     }
   };
 
@@ -594,9 +702,19 @@ const FileExplorer = () => {
 
         // Folder upload (IDs match)
         if (prev.id === payload.uploadId) {
-          if (prev.cancelRequested && !UPLOAD_FINAL_STATUSES.includes(payload.status)) {
-          return prev;
-        }
+          // Always preserve cancellation state from ref
+          const nextCancelRequested = prev.cancelRequested || cancelUploadsRef.current;
+          
+          if (nextCancelRequested && !UPLOAD_FINAL_STATUSES.includes(payload.status)) {
+            // If cancellation was requested but backend hasn't confirmed yet, close dialog after short delay
+            setTimeout(() => {
+              const targetName = prev.folderName || prev.currentFile || 'upload';
+              setToast({ message: `Upload "${targetName}" cancelled`, type: 'warning' });
+              setActiveUpload(null);
+              cancelUploadsRef.current = false; // Reset cancellation flag
+            }, 500); // Close dialog quickly when cancellation is requested
+            return { ...prev, cancelRequested: true }; // Ensure cancelRequested is set
+          }
 
         const next: UploadTaskState = {
           ...prev,
@@ -608,34 +726,169 @@ const FileExplorer = () => {
           currentFile: payload.currentFile ?? prev.currentFile,
           currentFileSize: typeof payload.currentFileSize === 'number' ? payload.currentFileSize : prev.currentFileSize,
           currentFileUploaded: typeof payload.currentFileUploaded === 'number' ? payload.currentFileUploaded : prev.currentFileUploaded,
+          currentFileLocalPath: (payload as any).currentFileLocalPath ?? prev.currentFileLocalPath,
           speed: typeof payload.speed === 'number' ? payload.speed : prev.speed,
-          cancelRequested: prev.cancelRequested
+          cancelRequested: nextCancelRequested, // Preserve cancellation state from ref
+          currentFileRemotePath: (payload as any).currentFileRemotePath ?? prev.currentFileRemotePath
         };
 
+        // Don't call setToast or handleNavigate inside the updater - defer to avoid React warnings
         if (['completed', 'failed', 'cancelled'].includes(payload.status)) {
-          const status = payload.status as UploadStatus;
-            const targetName = prev.folderName || prev.currentFile || 'upload';
-          if (status === 'completed') {
-            setToast({ message: 'Folder upload completed', type: 'success' });
-          } else if (status === 'failed') {
-            setToast({ message: `Folder upload failed: ${payload.error || 'Unknown error'}`, type: 'error' });
-          } else {
-              setToast({ message: `Upload "${targetName}" cancelled`, type: 'warning' });
-          }
-          handleNavigate(currentPath);
+          const status = payload.status as UploadStatus | 'cancelled';
+          const targetName = prev.folderName || prev.currentFile || 'upload';
+          const isSingleUpload = prev.isSingleUpload;
+          const wasCancelled = prev.cancelRequested || payload.status === 'cancelled';
+          // Defer toast and navigation to avoid updating components during render
           setTimeout(() => {
-            setActiveUpload(null);
-          }, 2000);
+            if (status === 'completed' && !wasCancelled) {
+              // Only show success if not cancelled
+              if (isSingleUpload && targetName) {
+                setToast({ message: `Upload completed: ${targetName}`, type: 'success' });
+              } else {
+                setToast({ message: 'Uploaded files successfully', type: 'success' });
+              }
+            } else if (status === 'failed') {
+              setToast({ message: `Folder upload failed: ${payload.error || 'Unknown error'}`, type: 'error' });
+            } else if (wasCancelled || payload.status === 'cancelled') {
+              setToast({ message: `Upload "${targetName}" cancelled`, type: 'warning' });
+            }
+            handleNavigate(currentPath);
+            setTimeout(() => {
+              setActiveUpload(null);
+              // Reset cancellation flag when upload session ends
+              cancelUploadsRef.current = false;
+            }, 1000); // Reduced delay for faster closing
+          }, 0);
         }
 
         return next;
         }
 
-        // Single/multi file session (per-file uploadId)
+        // Single/multi file session (per-file uploadId) - for new unified upload manager
+        // Check if this is a unified upload session (has uploadList)
+        if (prev.uploadList && prev.uploadList.length > 0) {
+          // This is a unified upload session - update from progress payload
+          // Calculate total uploaded bytes: sum of completed items + current file progress
+          let totalUploadedBytes = 0;
+          let totalCompletedFiles = 0;
+          
+          if (prev.uploadList) {
+            // Sum up bytes from completed items
+            for (const listItem of prev.uploadList) {
+              if (listItem.status === 'completed' || listItem.status === 'skipped') {
+                totalUploadedBytes += listItem.size;
+                totalCompletedFiles++;
+              }
+            }
+            
+            // Add current file progress if it's being uploaded
+            if (prev.currentItemIndex !== undefined && prev.uploadList[prev.currentItemIndex]) {
+              const currentItem = prev.uploadList[prev.currentItemIndex];
+              if (currentItem.status === 'uploading' || currentItem.status === 'pending') {
+                // Add current file uploaded bytes
+                const currentFileUploaded = typeof payload.currentFileUploaded === 'number' 
+                  ? payload.currentFileUploaded 
+                  : (typeof payload.uploadedBytes === 'number' ? payload.uploadedBytes : 0);
+                totalUploadedBytes += currentFileUploaded;
+              }
+            }
+          }
+          
+          const next: UploadTaskState = {
+            ...prev,
+            status: payload.status as UploadStatus,
+            uploadedBytes: totalUploadedBytes, // Use calculated total
+            totalBytes: prev.totalBytes, // Keep total bytes from initial state
+            completedFiles: totalCompletedFiles, // Use calculated total
+            totalFiles: prev.totalFiles, // Keep total files from initial state
+            currentFile: payload.currentFile ?? prev.currentFile,
+            currentFileSize: typeof payload.currentFileSize === 'number' ? payload.currentFileSize : prev.currentFileSize,
+            currentFileUploaded: typeof payload.currentFileUploaded === 'number' ? payload.currentFileUploaded : prev.currentFileUploaded,
+            currentFileLocalPath: (payload as any).currentFileLocalPath ?? prev.currentFileLocalPath,
+            speed: typeof payload.speed === 'number' ? payload.speed : prev.speed,
+            cancelRequested: prev.cancelRequested || cancelUploadsRef.current,
+            currentFileRemotePath: (payload as any).currentFileRemotePath ?? prev.currentFileRemotePath
+          };
+          
+          // Update uploadList item status if we have currentItemIndex
+          if (next.currentItemIndex !== undefined && next.uploadList && next.uploadList[next.currentItemIndex]) {
+            const updatedList = [...next.uploadList];
+            const currentItem = updatedList[next.currentItemIndex];
+            
+            if (payload.status === 'uploading') {
+              // Update current file progress
+              updatedList[next.currentItemIndex] = { 
+                ...currentItem, 
+                status: 'uploading',
+                uploadedBytes: typeof payload.currentFileUploaded === 'number' ? payload.currentFileUploaded : (typeof payload.uploadedBytes === 'number' ? payload.uploadedBytes : currentItem.uploadedBytes)
+              };
+            } else if (payload.status === 'completed') {
+              updatedList[next.currentItemIndex] = { ...currentItem, status: 'completed', uploadedBytes: currentItem.size };
+            } else if (payload.status === 'failed') {
+              updatedList[next.currentItemIndex] = { ...currentItem, status: 'failed', error: (payload as any).error };
+            }
+            next.uploadList = updatedList;
+          }
+          
+          // Handle final status - only close dialog when ALL files are completed
+          // For unified upload sessions, we need to check if all files are done
+          const allFilesCompleted = next.completedFiles >= (next.totalFiles || 1);
+          
+          if (['failed', 'cancelled'].includes(payload.status)) {
+            // Failed or cancelled - close immediately
+            const status = payload.status as UploadStatus | 'cancelled';
+            const wasCancelled = prev.cancelRequested || payload.status === 'cancelled';
+            setTimeout(() => {
+              if (status === 'failed') {
+                setToast({ message: `Upload failed: ${(payload as any).error || 'Unknown error'}`, type: 'error' });
+              } else if (wasCancelled || payload.status === 'cancelled') {
+                setToast({ message: 'Upload cancelled', type: 'warning' });
+              }
+              handleNavigate(currentPath);
+              setTimeout(() => {
+                setActiveUpload(null);
+                cancelUploadsRef.current = false;
+              }, 1000);
+            }, 0);
+          } else if (payload.status === 'completed' && allFilesCompleted) {
+            // Only close when ALL files are completed
+            const wasCancelled = prev.cancelRequested;
+            setTimeout(() => {
+              if (!wasCancelled) {
+                setToast({ message: 'Uploaded files successfully', type: 'success' });
+              }
+              handleNavigate(currentPath);
+              setTimeout(() => {
+                setActiveUpload(null);
+                cancelUploadsRef.current = false;
+              }, 1000);
+            }, 0);
+          }
+          // For 'completed' status but not all files done, just update progress, don't close dialog
+          
+          return next;
+        }
+        
+        // Legacy: Single/multi file session (per-file uploadId) - old code path
         if (payload.uploadId && payload.uploadId === currentFileUploadIdRef.current) {
+          // If cancellation was requested, close dialog immediately
+          if (prev.cancelRequested && !UPLOAD_FINAL_STATUSES.includes(payload.status)) {
+            setTimeout(() => {
+              const targetName = prev.folderName || prev.currentFile || 'upload';
+              setToast({ message: `Upload "${targetName}" cancelled`, type: 'warning' });
+              setActiveUpload(null);
+              cancelUploadsRef.current = false; // Reset cancellation flag
+            }, 500); // Close dialog quickly when cancellation is requested
+            return prev;
+          }
+
           const uploaded = baseUploadedRef.current + (payload.currentFileUploaded ?? payload.uploadedBytes ?? 0);
           const total = totalBytesRef.current || prev.totalBytes;
-          const completedFiles = completedFilesRef.current + (payload.status === 'completed' ? 1 : 0);
+          // Use completedFiles from ref (which includes skipped files) instead of incrementing here
+          // The upload loop handles incrementing completedFiles for both uploaded and skipped files
+          const completedFiles = payload.status === 'completed' 
+            ? Math.max(completedFilesRef.current, prev.completedFiles + 1)
+            : completedFilesRef.current;
 
           const next: UploadTaskState = {
             ...prev,
@@ -647,24 +900,53 @@ const FileExplorer = () => {
             currentFile: payload.currentFile ?? prev.currentFile,
             currentFileSize: typeof payload.currentFileSize === 'number' ? payload.currentFileSize : prev.currentFileSize,
             currentFileUploaded: typeof payload.currentFileUploaded === 'number' ? payload.currentFileUploaded : prev.currentFileUploaded,
+            currentFileLocalPath: (payload as any).currentFileLocalPath ?? prev.currentFileLocalPath,
             speed: typeof payload.speed === 'number' ? payload.speed : prev.speed,
-            cancelRequested: prev.cancelRequested
+            cancelRequested: prev.cancelRequested || cancelUploadsRef.current, // Preserve cancellation state from ref
+            currentFileRemotePath: (payload as any).currentFileRemotePath ?? prev.currentFileRemotePath
           };
 
-          if (['completed', 'failed', 'cancelled'].includes(payload.status)) {
+          // Only show toast when ALL files are completed (not after each individual file)
+          // Check if this is the final completion (all files done)
+          const allFilesCompleted = next.completedFiles >= (next.totalFiles || 1);
+          const wasAllCompleted = prev.completedFiles >= (prev.totalFiles || 1);
+          
+          // IMPORTANT: Only show toast for 'completed' status if ALL files are done AND we haven't shown it yet
+          // The backend may send 'completed' status for each file, so we must check allFilesCompleted
+          if (['failed', 'cancelled'].includes(payload.status)) {
             const status = payload.status as UploadStatus;
             const targetName = prev.folderName || prev.currentFile || 'upload';
-            if (status === 'completed') {
-              setToast({ message: 'Upload completed', type: 'success' });
-            } else if (status === 'failed') {
-              setToast({ message: `Upload failed: ${payload.error || 'Unknown error'}`, type: 'error' });
-            } else {
-              setToast({ message: `Upload "${targetName}" cancelled`, type: 'warning' });
-            }
-            if (status === 'cancelled' || status === 'failed') {
-              setTimeout(() => setActiveUpload(null), 1500);
-            }
+            uploadCompletionToastShownRef.current = false; // Reset on failure/cancellation
+            // Defer toast calls to avoid updating components during render
+            setTimeout(() => {
+              if (status === 'failed') {
+                setToast({ message: `Upload failed: ${payload.error || 'Unknown error'}`, type: 'error' });
+              } else if (status === 'cancelled') {
+                setToast({ message: `Upload "${targetName}" cancelled`, type: 'warning' });
+              }
+              if (status === 'cancelled' || status === 'failed') {
+                setTimeout(() => {
+                  setActiveUpload(null);
+                  // Reset cancellation flag when upload session ends
+                  cancelUploadsRef.current = false;
+                }, 1000); // Reduced delay
+              }
+            }, 0);
+          } else if (payload.status === 'completed' && allFilesCompleted && !wasAllCompleted && !uploadCompletionToastShownRef.current && !prev.cancelRequested) {
+            // Only show success toast when transitioning to all-completed state (first time) and not cancelled
+            uploadCompletionToastShownRef.current = true;
+            const targetName = prev.folderName || prev.currentFile || 'upload';
+            const isSingleUpload = prev.isSingleUpload;
+            // Defer toast call to avoid updating components during render
+            setTimeout(() => {
+              if (isSingleUpload && targetName) {
+                setToast({ message: `Upload completed: ${targetName}`, type: 'success' });
+              } else {
+                setToast({ message: 'Uploaded files successfully', type: 'success' });
+              }
+            }, 0);
           }
+          // Don't show toast for intermediate file completions (status === 'completed' but not allFilesCompleted)
 
           return next;
         }
@@ -1050,7 +1332,8 @@ const FileExplorer = () => {
   // Drag and Drop Handlers
   const onDragOver = (e: React.DragEvent) => {
     e.preventDefault();
-    if (isConnected) setIsDragging(true);
+    // Disable drag and drop if there's an active upload
+    if (isConnected && !activeUpload) setIsDragging(true);
   };
 
   const onDragLeave = () => setIsDragging(false);
@@ -1059,6 +1342,11 @@ const FileExplorer = () => {
     e.preventDefault();
     setIsDragging(false);
     if (!isConnected) return;
+    // Disable drag and drop if there's an active upload
+    if (activeUpload) {
+      setToast({ message: 'Please wait for the current upload to finish', type: 'warning' });
+      return;
+    }
 
     const electron = (window as any).electronAPI;
     if (!electron) return;
@@ -1103,22 +1391,111 @@ const FileExplorer = () => {
       setToast({ message: `Cannot upload ${entry.fileName}: source path unavailable`, type: 'error' });
     });
 
-    if (directories.length > 0) {
-      console.log('[Upload] Queuing folder uploads:', { count: directories.length, folders: directories.map(d => d.fileName) });
-      directories.forEach((dir) => {
-        enqueueFolderUpload({
-          folderName: dir.fileName,
-          localPath: dir.localPath as string,
-          remotePath: buildRemotePath(dir.fileName)
-        });
-      });
-      setToast({
-        message: `Queued ${directories.length} folder upload${directories.length > 1 ? 's' : ''}`,
-        type: 'info'
+    // Recursively collect all files from folders using Electron IPC
+    const collectFilesFromFolder = async (folderPath: string, folderName: string, baseRemotePath: string): Promise<Array<{ name: string; localPath: string; remotePath: string; size: number; isFolder: boolean }>> => {
+      const items: Array<{ name: string; localPath: string; remotePath: string; size: number; isFolder: boolean }> = [];
+      
+      if (!electron?.collectFolderFiles) {
+        console.error('[Upload] collectFolderFiles API not available');
+        return items;
+      }
+
+      try {
+        const result = await electron.collectFolderFiles(folderPath, baseRemotePath);
+        if (result.success) {
+          // Add files
+          if (result.files) {
+            result.files.forEach((file: any) => {
+              items.push({
+                name: file.name,
+                localPath: file.localPath,
+                remotePath: file.remotePath,
+                size: file.size,
+                isFolder: false
+              });
+            });
+          }
+          
+          // Add empty folders (they need to be created on the server)
+          if (result.emptyFolders) {
+            result.emptyFolders.forEach((folder: any) => {
+              items.push({
+                name: folder.name,
+                localPath: folder.localPath,
+                remotePath: folder.remotePath,
+                size: 0,
+                isFolder: true // Mark as folder so we can create it
+              });
+            });
+          }
+        } else {
+          console.error(`[Upload] Failed to collect files from folder ${folderPath}:`, result.error);
+        }
+      } catch (err: any) {
+        console.error(`[Upload] Failed to collect files from folder ${folderPath}:`, err);
+      }
+      
+      return items;
+    };
+
+    // Combine all files and folders into a single upload session
+    const allItems: Array<{ name: string; localPath: string; remotePath: string; size: number; isFolder: boolean }> = [];
+    
+    // Add regular files first (these are top-level)
+    for (const file of regularFiles) {
+      allItems.push({
+        name: file.fileName,
+        localPath: file.localPath as string,
+        remotePath: buildRemotePath(file.fileName),
+        size: file.size || 0,
+        isFolder: false,
+        isTopLevel: true // Mark as top-level
       });
     }
+    
+    // Recursively collect files from folders
+    // Note: Folder conflict resolution will be handled in UploadManager
+    // We just collect all files here, and UploadManager will handle conflicts per file
+    for (const dir of directories) {
+      const folderLocalPath = dir.localPath as string;
+      const folderRemotePath = buildRemotePath(dir.fileName);
+      
+      // Add the folder itself as a top-level item (for conflict resolution)
+      // Note: We'll need to handle folder creation separately if needed
+      
+      // Collect files from the folder (these are NOT top-level)
+      const folderFiles = await collectFilesFromFolder(folderLocalPath, dir.fileName, folderRemotePath);
+      // Mark all files from folders as NOT top-level
+      folderFiles.forEach(file => {
+        file.isTopLevel = false;
+      });
+      allItems.push(...folderFiles);
+    }
 
-    if (regularFiles.length > 0) {
+    if (allItems.length > 0) {
+      const uploadType = allItems.length === 1 
+        ? (allItems[0].isFolder ? 'single folder' : 'single file')
+        : directories.length > 0 && regularFiles.length > 0
+        ? 'mixed (files + folders)'
+        : directories.length > 0
+        ? 'multiple folders'
+        : 'multiple files';
+      
+      console.log('[Upload] Starting unified upload session:', {
+        type: uploadType,
+        totalItems: allItems.length,
+        fileCount: regularFiles.length,
+        folderCount: directories.length,
+        items: allItems.map(i => ({ name: i.name, isFolder: i.isFolder })),
+        siteName: currentSite?.name
+      });
+
+      // Use unified upload manager for all items
+      await startUnifiedUploadWrapper(allItems);
+    }
+
+    // Legacy code below - will be removed after migration is complete
+    if (false && regularFiles.length > 0) {
       const totalBytes = regularFiles.reduce((sum, f) => sum + (f.size || 0), 0);
       const sessionId = `upload-session-${Date.now()}`;
       const totalFiles = regularFiles.length;
@@ -1138,7 +1515,13 @@ const FileExplorer = () => {
       completedFilesRef.current = 0;
       totalBytesRef.current = totalBytes;
       cancelUploadsRef.current = false;
+      uploadCompletionToastShownRef.current = false; // Reset toast tracking for new upload session
 
+      // Get the first file's paths for display
+      const firstFile = regularFiles[0];
+      const firstLocalPath = firstFile.localPath as string;
+      const firstRemotePath = buildRemotePath(firstFile.fileName);
+      
       setActiveUpload({
         id: sessionId,
         status: 'starting',
@@ -1151,33 +1534,98 @@ const FileExplorer = () => {
         currentFileSize: 0,
         speed: 0,
         folderName: isSingleFile ? regularFiles[0].fileName : (directories.length > 0 ? 'files' : 'files'),
-        isSingleUpload: isSingleFile
+        isSingleUpload: isSingleFile,
+        siteName: currentSite?.name,
+        siteHost: currentSite?.host,
+        localPath: isSingleFile ? firstLocalPath : undefined, // For single file, show the file path
+        remotePath: isSingleFile ? firstRemotePath : buildRemotePath('') // For single file, show the remote path
       });
 
       try {
+        let uploadDuplicateAction: 'overwrite' | 'rename' | 'skip' | null = null;
+        let uploadApplyToAll = false;
+
         for (const file of regularFiles) {
           if (cancelUploadsRef.current) break;
           const localPath = file.localPath as string;
           const fileName = file.fileName;
           let remotePath = buildRemotePath(fileName);
         
-          // Check if remote file exists
-          const existsResult = await electron.checkRemoteExists(remotePath);
-          if (existsResult.success && existsResult.exists) {
-            // Show duplicate dialog
-            const response = await new Promise<number>((resolve) => {
-              if (window.confirm(`The file "${fileName}" already exists on the server. Do you want to overwrite it?\n\nClick OK to Overwrite, Cancel to Skip`)) {
-                resolve(0); // Overwrite
-              } else {
-                resolve(2); // Skip
-              }
-            });
-            
-            if (response === 2) {
-              // Skip this file
-              continue;
+          // Handle duplicate using same logic as downloads
+          // If "apply to all" is checked, pass the action to backend to handle without showing dialog
+          console.log('[Duplicate Upload] Duplicate file detected:', {
+            fileName,
+            defaultConflictResolution: settings.defaultConflictResolution,
+            sessionConflictResolution: uploadApplyToAll ? uploadDuplicateAction : null,
+            applyToAll: uploadApplyToAll
+          });
+          
+          const duplicateResult: any = await electron.handleUploadDuplicate?.({
+            remotePath,
+            fileName,
+            duplicateAction: uploadApplyToAll ? uploadDuplicateAction : null,
+            applyToAll: uploadApplyToAll,
+            defaultConflictResolution: settings.defaultConflictResolution
+          });
+
+          // Check for cancellation first (even if success is true, cancellation takes precedence)
+          if (duplicateResult?.cancelled || duplicateResult?.dialogCancelled) {
+            // User cancelled duplicate dialog, stop upload and show warning toast
+            cancelUploadsRef.current = true;
+            setToast({ message: 'Upload cancelled', type: 'warning' });
+            break;
+          }
+
+          if (!duplicateResult?.success) {
+            // Error (but not cancelled - that's handled above)
+            // Skip this file - count it as completed
+            completedFiles += 1;
+            completedFilesRef.current = completedFiles;
+            setActiveUpload((prev) => prev ? {
+              ...prev,
+              completedFiles,
+              totalFiles
+            } : prev);
+            continue;
+          }
+
+          if (duplicateResult.skipped) {
+            // Skip this file - count it as completed
+            completedFiles += 1;
+            completedFilesRef.current = completedFiles;
+            setActiveUpload((prev) => prev ? {
+              ...prev,
+              completedFiles,
+              totalFiles
+            } : prev);
+            // Update duplicate action preferences if user chose "apply to all"
+            if (duplicateResult.applyToAll && duplicateResult.duplicateAction) {
+              uploadDuplicateAction = duplicateResult.duplicateAction;
+              uploadApplyToAll = true;
             }
-            // If overwrite (0), continue with upload
+            continue;
+          }
+
+          // Update duplicate action preferences if user chose "apply to all"
+          if (duplicateResult.applyToAll && duplicateResult.duplicateAction) {
+            uploadDuplicateAction = duplicateResult.duplicateAction;
+            uploadApplyToAll = true;
+          }
+
+          // Check if upload was cancelled before attempting upload
+          if (cancelUploadsRef.current) {
+            console.log('[Upload] Upload cancelled before starting:', { fileName });
+            break;
+          }
+
+          // Use the resolved remote path (may be renamed)
+          remotePath = duplicateResult.remotePath;
+          
+          // Validate remotePath before attempting upload
+          if (!remotePath || remotePath === '') {
+            console.error('[Error] Invalid remote path after duplicate resolution:', { fileName, remotePath });
+            setToast({ message: `Failed to upload ${fileName}: Invalid remote path`, type: 'error' });
+            break;
           }
           
           const uploadId = `${sessionId}-${fileName}-${Math.random().toString(36).slice(2, 6)}`;
@@ -1191,19 +1639,50 @@ const FileExplorer = () => {
             currentFile: fileName,
             currentFileSize: file.size,
             currentFileUploaded: 0,
+            currentFileLocalPath: localPath, // Store local path for current file
             uploadedBytes: baseUploaded,
             completedFiles,
-            totalFiles
+            totalFiles,
+            currentFileRemotePath: remotePath, // Store final remote path (may be renamed)
+            remotePath: isSingleFile ? remotePath : prev.remotePath, // Update remotePath for single file uploads
+            cancelRequested: prev.cancelRequested || cancelUploadsRef.current // Preserve cancellation state
           } : prev);
         
+          // Check for cancellation again before starting upload (in case it was cancelled during duplicate dialog)
+          if (cancelUploadsRef.current) {
+            console.log('[Upload] Upload cancelled before starting file upload:', { fileName });
+            break;
+          }
+        
+          // Before starting upload, check if cancellation was requested and cancel the current file's upload
+          if (cancelUploadsRef.current && currentFileUploadIdRef.current) {
+            console.log('[Upload] Cancellation requested, cancelling current file upload:', { fileName, uploadId: currentFileUploadIdRef.current });
+            try {
+              await electron.cancelUpload(currentFileUploadIdRef.current);
+            } catch (err: any) {
+              console.log('[Upload] Cancel request for current file uploadId not found:', { uploadId: currentFileUploadIdRef.current, error: err.message });
+            }
+            break;
+          }
+          
           const result = await electron.upload(localPath, remotePath, uploadId, settings.defaultConflictResolution);
+          
+          // Check for cancellation after upload completes (in case it was cancelled during upload)
+          if (cancelUploadsRef.current) {
+            console.log('[Upload] Upload cancelled during file upload:', { fileName, uploadId });
+            break;
+          }
         if (!result.success) {
-            // Don't show alert for cancelled uploads
-            if (result.error && !result.error.includes('cancelled')) {
+            // Check if upload was cancelled (either by user or due to duplicate dialog cancellation)
+            if (cancelUploadsRef.current || (result.error && result.error.includes('cancelled'))) {
+              console.log('[Upload] Upload cancelled:', { fileName, uploadId });
+              // Don't show toast here if we already showed it for duplicate dialog cancellation
+              if (!cancelUploadsRef.current) {
+                setToast({ message: 'Upload cancelled', type: 'warning' });
+              }
+            } else {
               console.error('[Error] Upload failed:', { fileName, error: result.error, uploadId });
               setToast({ message: `Failed to upload ${fileName}: ${result.error}`, type: 'error' });
-        } else {
-              console.log('[Upload] Upload cancelled:', { fileName, uploadId });
             }
             break;
           }
@@ -1213,14 +1692,39 @@ const FileExplorer = () => {
           completedFiles += 1;
           baseUploadedRef.current = baseUploaded;
           completedFilesRef.current = completedFiles;
-          setActiveUpload((prev) => prev ? {
-            ...prev,
-            status: completedFiles === totalFiles ? 'completed' : 'uploading',
-            uploadedBytes: baseUploaded,
-            completedFiles,
+          
+          // Only show toast when all files are completed (not after each file)
+          const allFilesCompleted = completedFiles === totalFiles;
+          
+          setActiveUpload((prev) => {
+            if (!prev) return prev;
+            const wasAllCompleted = prev.completedFiles >= (prev.totalFiles || 1);
+            const updated = {
+              ...prev,
+              status: allFilesCompleted ? 'completed' : 'uploading' as UploadStatus,
+              uploadedBytes: baseUploaded,
+              completedFiles,
+              cancelRequested: prev.cancelRequested || cancelUploadsRef.current, // Preserve cancellation state
             currentFileUploaded: file.size,
-            currentFile: fileName
-          } : prev);
+            currentFile: fileName,
+            currentFileLocalPath: localPath, // Store local path for current file
+            currentFileRemotePath: remotePath // Store final remote path (may be renamed)
+            };
+            
+            // Only show toast when transitioning to all-completed state (first time)
+            if (allFilesCompleted && !wasAllCompleted && !uploadCompletionToastShownRef.current) {
+              uploadCompletionToastShownRef.current = true;
+              const targetName = updated.folderName || updated.currentFile || 'upload';
+              const isSingleUpload = updated.isSingleUpload;
+              if (isSingleUpload && targetName) {
+                setToast({ message: `Upload completed: ${targetName}`, type: 'success' });
+              } else {
+                setToast({ message: 'Uploaded files successfully', type: 'success' });
+              }
+            }
+            
+            return updated;
+          });
     }
       } finally {
         const finalStatus = completedFiles === totalFiles ? 'completed' : 'cancelled';
@@ -1231,7 +1735,11 @@ const FileExplorer = () => {
           totalFiles,
           totalBytes 
         });
-        setTimeout(() => setActiveUpload(null), 1500);
+        setTimeout(() => {
+          setActiveUpload(null);
+          // Reset cancellation flag when upload session ends
+          cancelUploadsRef.current = false;
+        }, 1500);
       await handleNavigate(currentPath);
       }
     }
@@ -1356,7 +1864,10 @@ const FileExplorer = () => {
         {activeUpload && (
           <UploadProgressDialog
             upload={activeUpload}
-            onClose={() => setActiveUpload(null)}
+            onClose={() => {
+              setActiveUpload(null);
+              cancelUploadsRef.current = false; // Reset cancellation flag
+            }}
             onCancel={handleCancelUpload}
           />
         )}
@@ -1455,15 +1966,39 @@ const FileExplorer = () => {
 
         {/* File List Header */}
         <div className="grid grid-cols-12 px-4 py-2 border-b border-border bg-muted/20 text-xs font-semibold text-muted-foreground">
-            <div className="col-span-6">Name</div>
-            <div className="col-span-2 text-right">Size</div>
-            <div className="col-span-2 text-right">Modified</div>
+            <div 
+                className="col-span-6 flex items-center gap-1 cursor-pointer hover:text-foreground select-none transition-colors"
+                onClick={() => handleSort('name')}
+            >
+                Name
+                {sortColumn === 'name' && (
+                    sortDirection === 'asc' ? <ArrowUp size={12} /> : <ArrowDown size={12} />
+                )}
+            </div>
+            <div 
+                className="col-span-2 text-right flex items-center justify-end gap-1 cursor-pointer hover:text-foreground select-none transition-colors"
+                onClick={() => handleSort('size')}
+            >
+                Size
+                {sortColumn === 'size' && (
+                    sortDirection === 'asc' ? <ArrowUp size={12} /> : <ArrowDown size={12} />
+                )}
+            </div>
+            <div 
+                className="col-span-2 text-right flex items-center justify-end gap-1 cursor-pointer hover:text-foreground select-none transition-colors"
+                onClick={() => handleSort('modified')}
+            >
+                Modified
+                {sortColumn === 'modified' && (
+                    sortDirection === 'asc' ? <ArrowUp size={12} /> : <ArrowDown size={12} />
+                )}
+            </div>
             <div className="col-span-2 text-center">Actions</div>
         </div>
 
         {/* File List */}
         <div className="flex-1 overflow-y-auto custom-scrollbar">
-            {visibleFiles.map((file, idx) => (
+            {sortedFiles.map((file, idx) => (
                 <div 
                     key={idx}
                     style={{ animationDelay: `${Math.min(idx * 0.03, 0.3)}s` }}

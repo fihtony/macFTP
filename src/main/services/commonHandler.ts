@@ -366,6 +366,65 @@ ipcMain.handle('fs:path-info', async (_event, { targetPath }: { targetPath: stri
   }
 });
 
+// Recursively collect all files from a folder (including empty folders)
+ipcMain.handle('fs:collect-folder-files', async (_event, { folderPath, baseRemotePath }: { folderPath: string; baseRemotePath: string }) => {
+  const files: Array<{ name: string; localPath: string; remotePath: string; size: number }> = [];
+  const emptyFolders: Array<{ name: string; localPath: string; remotePath: string }> = [];
+
+  const walk = async (currentPath: string, relativePath: string) => {
+    try {
+      const entries = await fs.promises.readdir(currentPath, { withFileTypes: true });
+      let hasFiles = false;
+
+      for (const entry of entries) {
+        const entryPath = path.join(currentPath, entry.name);
+        const entryRelativePath = relativePath ? path.join(relativePath, entry.name) : entry.name;
+        const entryRemotePath = baseRemotePath === '/' ? `/${entryRelativePath}` : `${baseRemotePath}/${entryRelativePath}`;
+
+        if (entry.isDirectory()) {
+          // Recursively walk subdirectories
+          await walk(entryPath, entryRelativePath);
+          hasFiles = true; // Subdirectory exists, so this directory is not empty
+        } else if (entry.isFile()) {
+          // Add file
+          hasFiles = true;
+          try {
+            const stats = await fs.promises.stat(entryPath);
+            files.push({
+              name: entry.name,
+              localPath: entryPath,
+              remotePath: entryRemotePath,
+              size: stats.size
+            });
+          } catch (err: any) {
+            console.error(`[fs:collect-folder-files] Failed to get file stats for ${entryPath}:`, err);
+          }
+        }
+      }
+      
+      // If this directory is empty, add it to emptyFolders list
+      if (!hasFiles && relativePath) {
+        const folderRemotePath = baseRemotePath === '/' ? `/${relativePath}` : `${baseRemotePath}/${relativePath}`;
+        emptyFolders.push({
+          name: path.basename(relativePath),
+          localPath: currentPath,
+          remotePath: folderRemotePath
+        });
+      }
+    } catch (err: any) {
+      console.error(`[fs:collect-folder-files] Failed to read directory ${currentPath}:`, err);
+    }
+  };
+
+  try {
+    await walk(folderPath, '');
+    // Return both files and empty folders (empty folders will need to be created separately)
+    return { success: true, files, emptyFolders };
+  } catch (err: any) {
+    return { success: false, error: err.message, files: [], emptyFolders: [] };
+  }
+});
+
 ipcMain.handle('ftp:chmod', async (event, { path: remotePath, mode }: { path: string, mode: string }) => {
   try {
     if (currentProtocol === 'sftp' && sftpClient) {
@@ -567,14 +626,19 @@ ipcMain.handle('upload:cancel', async (_event, { uploadId }: { uploadId: string 
   
   const controller = uploadControllers.get(uploadId);
   if (!controller) {
-    return { success: false, error: 'Upload not found' };
+    // Upload not found - it may have already completed or been cleaned up
+    // This is not an error, just return success since the frontend will handle cancellation via cancelRequested flag
+    console.log('[Upload] Cancel request for uploadId not found (may have already completed):', { uploadId });
+    return { success: true };
   }
   
+  console.log('[Upload] Cancel request received:', { uploadId });
   controller.cancelRequested = true;
   const snapshot = uploadStates.get(uploadId);
   if (snapshot) {
     notifyUploadProgress({ ...snapshot, status: 'cancelled' });
   }
+  console.log('[Upload] Cancel request confirmed:', { uploadId });
   
   return { success: true };
 });
@@ -801,6 +865,16 @@ export interface DuplicateResolutionResult {
   dialogCancelled?: boolean;
 }
 
+export interface DuplicateUploadResolutionResult {
+  remotePath: string;
+  actualFileName: string;
+  duplicateAction: 'overwrite' | 'rename' | 'skip';
+  applyToAll: boolean;
+  cancelled?: boolean;
+  skipped?: boolean;
+  dialogCancelled?: boolean;
+}
+
 export const handleDuplicateFile = async (
   win: BrowserWindow,
   defaultPath: string,
@@ -957,6 +1031,214 @@ export const handleDuplicateFolder = async (
 };
 
 // ============================================================================
+// Handle duplicate file during upload (similar to handleDuplicateFile but for remote files)
+export const handleDuplicateUploadFile = async (
+  win: BrowserWindow,
+  remotePath: string,
+  fileName: string,
+  duplicateAction?: 'overwrite' | 'rename' | 'skip',
+  applyToAll?: boolean,
+  defaultConflictResolution?: 'overwrite' | 'rename' | 'prompt'
+): Promise<DuplicateUploadResolutionResult> => {
+  let finalDuplicateAction = duplicateAction;
+  let finalApplyToAll = applyToAll || false;
+  let finalRemotePath: string = remotePath;
+
+  // Check if remote file exists
+  const checkRemoteExists = async (remotePath: string) => {
+    try {
+      if (currentProtocol === 'sftp' && sftpClient) {
+        await sftpClient.stat(remotePath);
+        return { success: true, exists: true };
+      } else if (currentProtocol === 'ftp' && ftpClient) {
+        await ftpClient.size(remotePath);
+        return { success: true, exists: true };
+      }
+    } catch {
+      return { success: true, exists: false };
+    }
+    return { success: false };
+  };
+
+  const existsResult = await checkRemoteExists(remotePath);
+  
+  if (existsResult.success && existsResult.exists) {
+    console.log('[Duplicate Upload] Remote file exists:', remotePath);
+    console.log('[Duplicate Upload] Default Conflict Resolution:', defaultConflictResolution);
+    console.log('[Duplicate Upload] Session Conflict Resolution:', finalDuplicateAction);
+    console.log('[Duplicate Upload] Apply to All Flag:', finalApplyToAll);
+    
+    if (finalDuplicateAction && finalApplyToAll) {
+      console.log('[Duplicate Upload] Applying previous "apply to all" action:', finalDuplicateAction);
+      if (finalDuplicateAction === 'skip') {
+        return { remotePath: '', actualFileName: fileName, duplicateAction: 'skip', applyToAll: true, skipped: true };
+      } else if (finalDuplicateAction === 'overwrite') {
+        finalRemotePath = remotePath;
+      } else {
+        // Rename: generate unique remote filename
+        const pathParts = path.posix.parse(remotePath);
+        const dir = pathParts.dir;
+        const baseName = pathParts.name;
+        const ext = pathParts.ext;
+        let counter = 1;
+        let newRemotePath: string;
+        
+        do {
+          const newFileName = `${baseName} (${counter})${ext}`;
+          newRemotePath = path.posix.join(dir, newFileName);
+          const checkResult = await checkRemoteExists(newRemotePath);
+          if (!checkResult.success || !checkResult.exists) {
+            break;
+          }
+          counter++;
+        } while (true);
+        
+        finalRemotePath = newRemotePath;
+      }
+    } else if (defaultConflictResolution && defaultConflictResolution !== 'prompt') {
+      // Use global default conflict resolution setting
+      if (defaultConflictResolution === 'overwrite') {
+        finalRemotePath = remotePath;
+        finalDuplicateAction = 'overwrite';
+      } else if (defaultConflictResolution === 'rename') {
+        // Rename: generate unique remote filename
+        const pathParts = path.posix.parse(remotePath);
+        const dir = pathParts.dir;
+        const baseName = pathParts.name;
+        const ext = pathParts.ext;
+        let counter = 1;
+        let newRemotePath: string;
+        
+        do {
+          const newFileName = `${baseName} (${counter})${ext}`;
+          newRemotePath = path.posix.join(dir, newFileName);
+          const checkResult = await checkRemoteExists(newRemotePath);
+          if (!checkResult.success || !checkResult.exists) {
+            break;
+          }
+          counter++;
+        } while (true);
+        
+        finalRemotePath = newRemotePath;
+        finalDuplicateAction = 'rename';
+      } else { // skip
+        return { remotePath: '', actualFileName: fileName, duplicateAction: 'skip', applyToAll: false, skipped: true };
+      }
+    } else {
+      // Show dialog (same as download)
+      console.log('[Duplicate Upload] Showing duplicate resolution dialog.');
+      const result = await dialog.showMessageBox(win, {
+        type: 'question',
+        buttons: ['Overwrite', 'Rename', 'Skip', 'Cancel'],
+        defaultId: 1,
+        title: 'File Already Exists',
+        message: `The file "${fileName}" already exists on the server.`,
+        detail: `What would you like to do?`,
+        checkboxLabel: 'Apply to all similar cases',
+        checkboxChecked: false
+      });
+      
+      console.log('[Duplicate Upload] User chose in dialog:', {
+        response: result.response,
+        checkboxChecked: result.checkboxChecked
+      });
+      
+      if (result.response === 3) {
+        return { remotePath: '', actualFileName: fileName, duplicateAction: 'skip', applyToAll: false, cancelled: true, dialogCancelled: true };
+      }
+      
+      if (result.response === 2) {
+        finalApplyToAll = result.checkboxChecked || false;
+        console.log('[Duplicate Upload] User chose Skip:', {
+          sessionConflictResolution: 'skip',
+          applyToAll: finalApplyToAll
+        });
+        return { remotePath: '', actualFileName: fileName, duplicateAction: 'skip', applyToAll: finalApplyToAll, skipped: true };
+      }
+      
+      finalApplyToAll = result.checkboxChecked || false;
+      
+      if (result.response === 0) {
+        finalDuplicateAction = 'overwrite';
+        finalRemotePath = remotePath;
+        console.log('[Duplicate Upload] User chose Overwrite:', {
+          sessionConflictResolution: 'overwrite',
+          applyToAll: finalApplyToAll
+        });
+      } else {
+        finalDuplicateAction = 'rename';
+        console.log('[Duplicate Upload] User chose Rename:', {
+          sessionConflictResolution: 'rename',
+          applyToAll: finalApplyToAll
+        });
+        // Rename: generate unique remote filename
+        const pathParts = path.posix.parse(remotePath);
+        const dir = pathParts.dir;
+        const baseName = pathParts.name;
+        const ext = pathParts.ext;
+        let counter = 1;
+        let newRemotePath: string;
+        
+        do {
+          const newFileName = `${baseName} (${counter})${ext}`;
+          newRemotePath = path.posix.join(dir, newFileName);
+          const checkResult = await checkRemoteExists(newRemotePath);
+          if (!checkResult.success || !checkResult.exists) {
+            break;
+          }
+          counter++;
+        } while (true);
+        
+        finalRemotePath = newRemotePath;
+      }
+    }
+  } else {
+    finalRemotePath = remotePath;
+  }
+
+  const actualFileName = path.posix.basename(finalRemotePath);
+  console.log('[Duplicate Upload] Final resolution:', {
+    remotePath: finalRemotePath,
+    actualFileName,
+    duplicateAction: finalDuplicateAction || 'overwrite',
+    applyToAll: finalApplyToAll
+  });
+  return {
+    remotePath: finalRemotePath,
+    actualFileName,
+    duplicateAction: finalDuplicateAction || 'overwrite',
+    applyToAll: finalApplyToAll
+  };
+};
+
+// IPC handler for handling duplicate upload files
+ipcMain.handle('upload:handle-duplicate', async (event, {
+  remotePath,
+  fileName,
+  duplicateAction,
+  applyToAll,
+  defaultConflictResolution
+}: {
+  remotePath: string;
+  fileName: string;
+  duplicateAction?: 'overwrite' | 'rename' | 'skip';
+  applyToAll?: boolean;
+  defaultConflictResolution?: 'overwrite' | 'rename' | 'prompt';
+}) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) {
+    return { success: false, error: 'No window' };
+  }
+
+  try {
+    const result = await handleDuplicateUploadFile(win, remotePath, fileName, duplicateAction, applyToAll, defaultConflictResolution);
+    return { success: true, ...result };
+  } catch (err: any) {
+    console.error('[Upload] Error handling duplicate:', err);
+    return { success: false, error: err.message };
+  }
+});
+
 // Registration Function
 // ============================================================================
 

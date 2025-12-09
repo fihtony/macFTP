@@ -25,6 +25,8 @@ export interface UploadProgressUpdate {
   currentFile?: string;
   currentFileUploaded?: number;
   currentFileSize?: number;
+  currentFileLocalPath?: string;
+  currentFileRemotePath?: string;
   speed?: number;
   error?: string;
   message?: string;
@@ -50,6 +52,8 @@ export const notifyUploadProgress = (update: UploadProgressUpdate) => {
     currentFile: update.currentFile ?? previous.currentFile,
     currentFileUploaded: update.currentFileUploaded ?? previous.currentFileUploaded,
     currentFileSize: update.currentFileSize ?? previous.currentFileSize,
+    currentFileLocalPath: update.currentFileLocalPath ?? previous.currentFileLocalPath,
+    currentFileRemotePath: update.currentFileRemotePath ?? previous.currentFileRemotePath,
     speed: update.speed ?? previous.speed,
     error: update.error,
     message: update.message
@@ -120,6 +124,12 @@ const uploadFileViaSftp = async (
   let currentUploaded = 0;
 
   const emitProgress = () => {
+    // Check for cancellation during progress updates
+    if (controller.cancelRequested) {
+      console.log('[Upload] Cancellation detected during single file upload (SFTP), stopping:', { uploadId: controller.uploadId, file: path.posix.basename(remotePath) });
+      return; // Stop emitting progress if cancelled
+    }
+    
     const now = Date.now();
     const elapsedSeconds = Math.max((now - startedAt) / 1000, 0.001);
     notifyUploadProgress({
@@ -156,15 +166,17 @@ const uploadFileViaSftp = async (
     });
 
     localStream.on('data', (chunk: Buffer | string) => {
-      const chunkLength = typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length;
-      currentUploaded += chunkLength;
-      emitProgress();
-
+      // Check for cancellation first, before processing chunk
       if (controller.cancelRequested) {
+        console.log('[Upload] Cancellation detected in data stream (SFTP single file), stopping immediately:', { uploadId: controller.uploadId, file: path.posix.basename(remotePath) });
         cleanup();
         reject(createUploadAbortError('cancelled'));
         return;
       }
+      
+      const chunkLength = typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length;
+      currentUploaded += chunkLength;
+      emitProgress();
     });
 
     localStream.on('error', (err) => {
@@ -202,6 +214,12 @@ const uploadFileViaFtp = async (
     };
 
     const emitProgress = () => {
+      // Check for cancellation during progress updates
+      if (controller.cancelRequested) {
+        console.log('[Upload] Cancellation detected during single file upload (FTP), stopping:', { uploadId: controller.uploadId, file: path.posix.basename(remotePath) });
+        return; // Stop emitting progress if cancelled
+      }
+      
       const now = Date.now();
       const elapsedSeconds = Math.max((now - startedAt) / 1000, 0.001);
       notifyUploadProgress({
@@ -219,14 +237,18 @@ const uploadFileViaFtp = async (
     };
 
     stream.on('data', (chunk: Buffer | string) => {
+      // Check for cancellation first, before processing chunk
+      if (controller.cancelRequested) {
+        console.log('[Upload] Cancellation detected in data stream (FTP single file), stopping immediately:', { uploadId: controller.uploadId, file: path.posix.basename(remotePath) });
+        cleanup();
+        stream.destroy();
+        reject(createUploadAbortError('cancelled'));
+        return;
+      }
+      
       const chunkLength = typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length;
       currentUploaded += chunkLength;
       emitProgress();
-      if (controller.cancelRequested) {
-        cleanup();
-        stream.destroy(createUploadAbortError('cancelled'));
-        return;
-      }
     });
 
     stream.on('error', (err) => {
@@ -260,39 +282,9 @@ ipcMain.handle('ftp:upload', async (event, { localPath, remotePath, uploadId: pr
     if (!fs.existsSync(localPath)) throw new Error('Local file not found');
     if (!currentConnectionConfig || !currentProtocol) throw new Error('Not connected');
 
-    // Check conflict
-    const existsResult = await checkRemoteExists(remotePath);
-    if (existsResult.success && existsResult.exists) {
-      const fileName = path.posix.basename(remotePath);
-      if (defaultConflictResolution && defaultConflictResolution !== 'prompt') {
-        if (defaultConflictResolution === 'skip') {
-          return { success: false, cancelled: true, skipped: true };
-        }
-        if (defaultConflictResolution === 'rename') {
-          const remoteDir = path.posix.dirname(remotePath);
-          remotePath = await generateUniqueRemoteName(remoteDir, fileName);
-        }
-        // overwrite: continue
-      } else {
-        const win = BrowserWindow.getFocusedWindow();
-        if (!win) return { success: false, error: 'No window' };
-        const result = await dialog.showMessageBox(win, {
-          type: 'question',
-          buttons: ['Overwrite', 'Skip', 'Cancel'],
-          title: 'File Already Exists',
-          message: `The file \"${fileName}\" already exists on the server.`
-        });
-        if (result.response === 1) { // Skip
-          return { success: false, cancelled: true, skipped: true };
-        }
-        if (result.response === 2) { // Cancel
-          return { success: false, cancelled: true };
-        }
-        if (result.response === 0) {
-          // overwrite
-        }
-      }
-    }
+    // Note: Duplicate checking is now handled by the frontend via handleUploadDuplicate
+    // The remotePath passed here is already resolved (may be renamed or confirmed for overwrite)
+    // No need to check again here to avoid duplicate dialogs
 
     const fileSize = fs.statSync(localPath).size;
     const uploadId = providedUploadId || `upload-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -323,6 +315,12 @@ ipcMain.handle('ftp:upload', async (event, { localPath, remotePath, uploadId: pr
         throw new Error('Not connected');
       }
 
+      // Check if cancelled before marking as completed
+      if (controller.cancelRequested) {
+        console.log('[Upload] Upload cancelled before completion (confirmed):', { uploadId, localPath, remotePath });
+        throw createUploadAbortError('cancelled');
+      }
+      
       const elapsedSeconds = Math.max((Date.now() - startedAt) / 1000, 0.001);
       console.log('[Success] Upload completed:', { uploadId, localPath, remotePath, fileSize, elapsedSeconds, speed: fileSize / elapsedSeconds });
       notifyUploadProgress({
@@ -365,7 +363,7 @@ ipcMain.handle('ftp:upload', async (event, { localPath, remotePath, uploadId: pr
         }
       }
       if (status === 'cancelled') {
-        console.log('[Upload] Upload cancelled:', { uploadId, localPath, remotePath });
+        console.log('[Upload] Upload cancelled (confirmed):', { uploadId, localPath, remotePath, error: err.message });
       } else {
         console.error('[Error] Upload failed:', { uploadId, localPath, remotePath, error: err.message, code: err.code });
       }

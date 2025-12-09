@@ -119,12 +119,12 @@ const cancelPendingJob = (id: string, reason: DownloadStatus) => {
 };
 
 export const cancelDownloadJob = (id: string, reason: DownloadStatus = 'cancelled', localPath?: string) => {
-  console.log('[Download] Cancelling download job:', id, 'reason:', reason, 'Active jobs:', activeDownloadJobs);
+  console.log('[Download] Cancel request received:', { downloadId: id, reason, activeJobs: activeDownloadJobs });
   
   // Check unified queue first (for queued downloads)
   const queuedItem = cancelQueuedDownload(id);
   if (queuedItem) {
-    console.log('[Download] Cancelled queued download from unified queue:', id);
+    console.log('[Download] Cancelled queued download from unified queue:', { downloadId: id });
     
     // Send cancellation notification
     if (queuedItem.type === 'file' && queuedItem.fileJob) {
@@ -173,8 +173,9 @@ export const cancelDownloadJob = (id: string, reason: DownloadStatus = 'cancelle
   // Check active downloads
   const controller = activeDownloadControllers.get(id);
   if (controller) {
-    console.log('[Download] Calling abort controller for active download:', id);
+    console.log('[Download] Found active download, calling abort controller:', { downloadId: id, reason });
     controller(reason);
+    console.log('[Download] Cancel request confirmed (active download):', { downloadId: id });
     // Don't send delayed notification - let the error handler in performDownloadJob send it
     return true;
   }
@@ -662,7 +663,13 @@ ipcMain.handle('ftp:download', async (event, { remotePath, fileName, downloadId,
 });
 
 ipcMain.handle('download:cancel', async (_event, { downloadId }: { downloadId: string }) => {
+  console.log('[Download] Cancel request received:', { downloadId });
   const success = cancelDownloadJob(downloadId, 'cancelled');
+  if (success) {
+    console.log('[Download] Cancel request confirmed:', { downloadId });
+  } else {
+    console.log('[Download] Cancel request failed: Download not found:', { downloadId });
+  }
   return { success };
 });
 

@@ -43,6 +43,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteEntry: (targetPath: string, isDirectory: boolean) => ipcRenderer.invoke('ftp:delete-entry', { targetPath, isDirectory }),
   createDirectory: (targetPath: string) => ipcRenderer.invoke('ftp:create-directory', { targetPath }),
   getPathInfo: (targetPath: string) => ipcRenderer.invoke('fs:path-info', { targetPath }),
+  collectFolderFiles: (folderPath: string, baseRemotePath: string) => ipcRenderer.invoke('fs:collect-folder-files', { folderPath, baseRemotePath }),
   uploadFolder: (localPath: string, remotePath: string, defaultConflictResolution?: 'overwrite' | 'rename' | 'prompt') => 
     ipcRenderer.invoke('ftp:upload-folder', { localPath, remotePath, defaultConflictResolution }),
   downloadFolder: (remotePath: string, folderName: string, downloadId: string, defaultDownloadPath?: string, duplicateAction?: 'overwrite' | 'rename' | 'skip', applyToAll?: boolean, defaultConflictResolution?: 'overwrite' | 'rename' | 'prompt') => 
@@ -61,6 +62,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   pauseUpload: (uploadId: string) => ipcRenderer.invoke('upload:pause', { uploadId }),
   resumeUpload: (uploadId: string) => ipcRenderer.invoke('upload:resume', { uploadId }),
   cancelUpload: (uploadId: string) => ipcRenderer.invoke('upload:cancel', { uploadId }),
+  handleUploadDuplicate: (params: { remotePath: string; fileName: string; duplicateAction?: 'overwrite' | 'rename' | 'skip'; applyToAll?: boolean; defaultConflictResolution?: 'overwrite' | 'rename' | 'prompt' }) =>
+    ipcRenderer.invoke('upload:handle-duplicate', params),
   
   // Open external links
   openExternal: (url: string) => ipcRenderer.invoke('shell:open-external', url),

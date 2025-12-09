@@ -510,13 +510,14 @@ ipcMain.handle('ftp:download-folder', async (event, { remotePath, folderName, do
 });
 
 ipcMain.handle('download-folder:cancel', async (_event, { downloadId }: { downloadId: string }) => {
-  console.log('[Folder Download] Cancel requested for:', downloadId);
+  console.log('[Folder Download] Cancel request received:', { downloadId });
   
   // Check for active controller (currently downloading)
   const controller = downloadFolderControllers.get(downloadId);
   if (controller) {
-    console.log('[Folder Download] Found active controller, setting cancel flag:', downloadId);
+    console.log('[Folder Download] Found active controller, setting cancel flag:', { downloadId });
     controller.cancelRequested = true;
+    console.log('[Folder Download] Cancel request confirmed (active download):', { downloadId });
     // Don't send notification here - let the download logic handle it naturally
     return { success: true, wasActive: true };
   }
@@ -524,7 +525,7 @@ ipcMain.handle('download-folder:cancel', async (_event, { downloadId }: { downlo
   // Check if in unified queue (not started yet)
   const queuedItem = cancelQueuedDownload(downloadId);
   if (queuedItem && queuedItem.type === 'folder' && queuedItem.folderJob) {
-    console.log('[Folder Download] Cancelled queued folder download from unified queue:', downloadId);
+    console.log('[Folder Download] Cancelled queued folder download from unified queue:', { downloadId });
     notifyDownloadProgress({
       id: downloadId,
       downloadedSize: 0,
@@ -536,14 +537,15 @@ ipcMain.handle('download-folder:cancel', async (_event, { downloadId }: { downlo
       actualFileName: queuedItem.folderJob.folderName,
       endTime: Date.now()
     });
+    console.log('[Folder Download] Cancel request confirmed (queued download):', { downloadId });
     return { success: true, wasQueued: true };
   }
 
   // Check if waiting for dialog resolution
   if (activeFolderJobs.has(downloadId)) {
-    console.log('[Folder Download] Found waiting for dialog, removing:', downloadId);
-    activeFolderJobs.delete(downloadId);
+    console.log('[Folder Download] Found waiting for dialog, removing:', { downloadId });
     const waitingJob = activeFolderJobs.get(downloadId);
+    activeFolderJobs.delete(downloadId);
     notifyDownloadProgress({
       id: downloadId,
       downloadedSize: 0,
@@ -555,6 +557,7 @@ ipcMain.handle('download-folder:cancel', async (_event, { downloadId }: { downlo
       actualFileName: waitingJob?.folderName,
       endTime: Date.now()
     });
+    console.log('[Folder Download] Cancel request confirmed (waiting for dialog):', { downloadId });
     return { success: true, wasWaitingForDialog: true };
   }
 
