@@ -1,36 +1,36 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { X, Save, Key, FolderOpen } from 'lucide-react';
-import { Site, useStore } from '../store';
+import React, { useState, useEffect, useMemo } from "react";
+import { X, Save, Key, FolderOpen } from "lucide-react";
+import { Site, useStore } from "../store";
 
 interface FtpServerModalProps {
   isOpen: boolean;
   site: Site | null;
   onClose: () => void;
-  onSave: (site: Omit<Site, 'id'>) => void;
+  onSave: (site: Omit<Site, "id">) => void;
 }
 
 const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, onSave }) => {
   const sites = useStore((state) => state.sites);
   const [formData, setFormData] = useState<Partial<Site>>({
-    name: 'My Site',
-    host: '',
+    name: "My Site",
+    host: "",
     port: 22,
-    user: '',
-    password: '',
-    protocol: 'sftp',
-    group: 'General',
-    privateKeyPath: '',
-    privateKeyContent: '',
-    initialPath: '/',
-    defaultDownloadPath: ''
+    user: "",
+    password: "",
+    protocol: "sftp",
+    group: "General",
+    privateKeyPath: "",
+    privateKeyContent: "",
+    initialPath: "/",
+    defaultDownloadPath: "",
   });
 
   const [showKeyContent, setShowKeyContent] = useState(false);
   const [isCreatingNewGroup, setIsCreatingNewGroup] = useState(false);
 
   const availableGroups = useMemo(() => {
-    const groups = new Set<string>(['General']);
-    sites.forEach(s => {
+    const groups = new Set<string>(["General"]);
+    sites.forEach((s) => {
       if (s.group) groups.add(s.group);
     });
     return Array.from(groups).sort();
@@ -44,28 +44,28 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
           host: site.host,
           port: site.port,
           user: site.user,
-          password: site.password || '',
+          password: site.password || "",
           protocol: site.protocol,
-          group: site.group || 'General',
-          privateKeyPath: site.privateKeyPath || '',
-          privateKeyContent: site.privateKeyContent || '',
-          initialPath: site.initialPath || '/',
-          defaultDownloadPath: site.defaultDownloadPath || ''
+          group: site.group || "General",
+          privateKeyPath: site.privateKeyPath || "",
+          privateKeyContent: site.privateKeyContent || "",
+          initialPath: site.initialPath || "/",
+          defaultDownloadPath: site.defaultDownloadPath || "",
         });
         setShowKeyContent(!!site.privateKeyContent);
       } else {
         setFormData({
-          name: 'My Site',
-          host: '',
+          name: "My Site",
+          host: "",
           port: 22,
-          user: '',
-          password: '',
-          protocol: 'sftp',
-          group: 'General',
-          privateKeyPath: '',
-          privateKeyContent: '',
-          initialPath: '/',
-          defaultDownloadPath: ''
+          user: "",
+          password: "",
+          protocol: "sftp",
+          group: "General",
+          privateKeyPath: "",
+          privateKeyContent: "",
+          initialPath: "/",
+          defaultDownloadPath: "",
         });
         setShowKeyContent(false);
       }
@@ -74,23 +74,21 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
 
   const handleSave = () => {
     if (!formData.host || !formData.user) {
-      alert('Please fill in Host and User fields');
+      alert("Please fill in Host and User fields");
       return;
     }
 
     const siteName = formData.name || formData.host;
-    
+
     // Check for duplicate site names (excluding current site if editing)
-    const duplicateSite = sites.find(s => 
-      s.name === siteName && (site ? s.id !== site.id : true)
-    );
-    
+    const duplicateSite = sites.find((s) => s.name === siteName && (site ? s.id !== site.id : true));
+
     if (duplicateSite) {
       alert(`A site with the name "${siteName}" already exists. Please use a different name.`);
       return;
     }
 
-    const siteData: Omit<Site, 'id'> = {
+    const siteData: Omit<Site, "id"> = {
       name: siteName,
       host: formData.host,
       port: formData.port || 22,
@@ -98,10 +96,10 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
       password: formData.password,
       privateKeyPath: formData.privateKeyPath,
       privateKeyContent: formData.privateKeyContent,
-      protocol: formData.protocol as 'ftp' | 'sftp',
-      group: formData.group || 'General',
-      initialPath: formData.initialPath || '/',
-      defaultDownloadPath: formData.defaultDownloadPath || undefined
+      protocol: formData.protocol as "ftp" | "sftp",
+      group: formData.group || "General",
+      initialPath: formData.initialPath || "/",
+      defaultDownloadPath: formData.defaultDownloadPath || undefined,
     };
 
     onSave(siteData);
@@ -109,9 +107,9 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
   };
 
   const handleGroupChange = (value: string) => {
-    if (value === '__CREATE_NEW__') {
+    if (value === "__CREATE_NEW__") {
       setIsCreatingNewGroup(true);
-      setFormData({ ...formData, group: '' });
+      setFormData({ ...formData, group: "" });
     } else {
       setFormData({ ...formData, group: value });
       setIsCreatingNewGroup(false);
@@ -134,12 +132,8 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
     <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
       <div className="bg-card border border-border rounded-lg shadow-xl w-full max-w-2xl">
         <div className="px-6 py-4 border-b border-border flex items-center justify-between">
-          <h2 className="text-lg font-semibold">{site ? 'Edit Site' : 'Add New Site'}</h2>
-          <button
-            onClick={onClose}
-            className="p-1 hover:bg-accent rounded transition-colors"
-            title="Close"
-          >
+          <h2 className="text-lg font-semibold">{site ? "Edit Site" : "Add New Site"}</h2>
+          <button onClick={onClose} className="p-1 hover:bg-accent rounded transition-colors" title="Close">
             <X size={18} />
           </button>
         </div>
@@ -153,14 +147,14 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
                 <input
                   className="w-full px-3 py-2 bg-input rounded border border-border focus:outline-none focus:ring-2 focus:ring-primary text-sm"
                   placeholder="Type new group name"
-                  value={formData.group || ''}
-                  onChange={e => handleGroupInputChange(e.target.value)}
+                  value={formData.group || ""}
+                  onChange={(e) => handleGroupInputChange(e.target.value)}
                   onBlur={() => {
                     // If empty or matches existing group, switch back to select
-                    if (!formData.group || availableGroups.includes(formData.group || '')) {
+                    if (!formData.group || availableGroups.includes(formData.group || "")) {
                       setIsCreatingNewGroup(false);
                       if (!formData.group) {
-                        setFormData({ ...formData, group: 'General' });
+                        setFormData({ ...formData, group: "General" });
                       }
                     }
                   }}
@@ -169,11 +163,13 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
               ) : (
                 <select
                   className="w-full px-3 py-2 bg-input rounded border border-border focus:outline-none focus:ring-2 focus:ring-primary text-sm"
-                  value={formData.group || 'General'}
-                  onChange={e => handleGroupChange(e.target.value)}
+                  value={formData.group || "General"}
+                  onChange={(e) => handleGroupChange(e.target.value)}
                 >
-                  {availableGroups.map(g => (
-                    <option key={g} value={g}>{g}</option>
+                  {availableGroups.map((g) => (
+                    <option key={g} value={g}>
+                      {g}
+                    </option>
                   ))}
                   <option value="__CREATE_NEW__" className="text-muted-foreground italic">
                     &lt;create new group&gt;
@@ -187,7 +183,7 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
                 className="w-full px-3 py-2 bg-input rounded border border-border focus:outline-none focus:ring-2 focus:ring-primary text-sm"
                 placeholder="My Site"
                 value={formData.name}
-                onChange={e => setFormData({ ...formData, name: e.target.value })}
+                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
               />
             </div>
           </div>
@@ -199,9 +195,9 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
               <select
                 className="w-full px-3 py-2 bg-input rounded border border-border focus:outline-none focus:ring-2 focus:ring-primary text-sm"
                 value={formData.protocol}
-                onChange={e => {
-                  const newProtocol = e.target.value as 'ftp' | 'sftp';
-                  const defaultPort = newProtocol === 'sftp' ? 22 : 21;
+                onChange={(e) => {
+                  const newProtocol = e.target.value as "ftp" | "sftp";
+                  const defaultPort = newProtocol === "sftp" ? 22 : 21;
                   setFormData({ ...formData, protocol: newProtocol, port: defaultPort });
                 }}
               >
@@ -215,7 +211,7 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
                 className="w-full px-3 py-2 bg-input rounded border border-border focus:outline-none focus:ring-2 focus:ring-primary text-sm"
                 placeholder="example.com"
                 value={formData.host}
-                onChange={e => setFormData({ ...formData, host: e.target.value })}
+                onChange={(e) => setFormData({ ...formData, host: e.target.value })}
               />
             </div>
             <div className="w-20">
@@ -225,7 +221,7 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
                 type="number"
                 placeholder="22"
                 value={formData.port}
-                onChange={e => setFormData({ ...formData, port: parseInt(e.target.value) || 22 })}
+                onChange={(e) => setFormData({ ...formData, port: parseInt(e.target.value) || 22 })}
               />
             </div>
           </div>
@@ -238,7 +234,7 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
                 className="w-full px-3 py-2 bg-input rounded border border-border focus:outline-none focus:ring-2 focus:ring-primary text-sm"
                 placeholder="username"
                 value={formData.user}
-                onChange={e => setFormData({ ...formData, user: e.target.value })}
+                onChange={(e) => setFormData({ ...formData, user: e.target.value })}
               />
             </div>
             <div className="flex-1">
@@ -248,7 +244,7 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
                 type="password"
                 placeholder="password"
                 value={formData.password}
-                onChange={e => setFormData({ ...formData, password: e.target.value })}
+                onChange={(e) => setFormData({ ...formData, password: e.target.value })}
               />
             </div>
           </div>
@@ -260,8 +256,8 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
               <input
                 className="w-full px-3 py-2 bg-input rounded border border-border text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary"
                 placeholder="/home/user/docs"
-                value={formData.initialPath || '/'}
-                onChange={e => setFormData({ ...formData, initialPath: e.target.value || '/' })}
+                value={formData.initialPath || "/"}
+                onChange={(e) => setFormData({ ...formData, initialPath: e.target.value || "/" })}
               />
             </div>
             <div className="flex-1">
@@ -270,8 +266,8 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
                 <input
                   className="flex-1 px-3 py-2 bg-input rounded border border-border text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary"
                   placeholder="Leave empty to prompt each time"
-                  value={formData.defaultDownloadPath || ''}
-                  onChange={e => setFormData({ ...formData, defaultDownloadPath: e.target.value })}
+                  value={formData.defaultDownloadPath || ""}
+                  onChange={(e) => setFormData({ ...formData, defaultDownloadPath: e.target.value })}
                 />
                 <button
                   type="button"
@@ -279,7 +275,7 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
                     const electron = (window as any).electronAPI;
                     if (electron) {
                       const result = await electron.selectFile({
-                        properties: ['openDirectory']
+                        properties: ["openDirectory"],
                       });
                       if (!result.cancelled && result.filePaths && result.filePaths[0]) {
                         setFormData({ ...formData, defaultDownloadPath: result.filePaths[0] });
@@ -296,7 +292,7 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
           </div>
 
           {/* SSH Key Authentication (SFTP only) */}
-          {formData.protocol === 'sftp' && (
+          {formData.protocol === "sftp" && (
             <div className="space-y-3 pt-2 border-t border-border">
               <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
                 <Key size={12} />
@@ -308,28 +304,26 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
                 <input
                   className="flex-1 px-3 py-2 bg-input rounded border border-border text-xs focus:outline-none focus:ring-2 focus:ring-primary"
                   placeholder="Private Key Path"
-                  value={formData.privateKeyPath || ''}
-                  onChange={e => setFormData({ ...formData, privateKeyPath: e.target.value, privateKeyContent: '' })}
+                  value={formData.privateKeyPath || ""}
+                  onChange={(e) => setFormData({ ...formData, privateKeyPath: e.target.value, privateKeyContent: "" })}
                 />
                 <button
                   type="button"
                   onClick={async () => {
                     const electron = (window as any).electronAPI;
                     if (electron) {
+                      // Use no filters to allow selecting any file, including id_rsa without extension
                       const result = await electron.selectFile({
-                        filters: [
-                          { name: 'SSH Keys', extensions: ['pem', 'key', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519'] },
-                          { name: 'All Files', extensions: ['*'] }
-                        ]
+                        properties: ["openFile"],
                       });
                       if (!result.cancelled && result.filePaths && result.filePaths[0]) {
-                        setFormData({ ...formData, privateKeyPath: result.filePaths[0], privateKeyContent: '' });
+                        setFormData({ ...formData, privateKeyPath: result.filePaths[0], privateKeyContent: "" });
                         setShowKeyContent(false);
                       }
                     }
                   }}
                   className="px-3 py-2 bg-accent hover:bg-accent/80 rounded text-xs flex items-center gap-1"
-                  title="Browse for SSH key file"
+                  title="Browse for SSH key file (e.g., ~/.ssh/id_rsa)"
                 >
                   <FolderOpen size={12} />
                 </button>
@@ -343,13 +337,13 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
                 onClick={() => {
                   setShowKeyContent(!showKeyContent);
                   if (!showKeyContent) {
-                    setFormData({ ...formData, privateKeyPath: '' });
+                    setFormData({ ...formData, privateKeyPath: "" });
                   }
                 }}
                 className="w-full px-3 py-2 bg-accent/50 hover:bg-accent rounded text-xs flex items-center justify-center gap-1"
               >
                 <Key size={12} />
-                {showKeyContent ? 'Hide' : 'Paste'} SSH Key Content
+                {showKeyContent ? "Hide" : "Paste"} SSH Key Content
               </button>
 
               {showKeyContent && (
@@ -357,18 +351,15 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
                   className="w-full px-3 py-2 bg-input rounded border border-border text-xs font-mono resize-none focus:outline-none focus:ring-2 focus:ring-primary"
                   placeholder="Paste your SSH private key here (starts with -----BEGIN...)"
                   rows={4}
-                  value={formData.privateKeyContent || ''}
-                  onChange={e => setFormData({ ...formData, privateKeyContent: e.target.value, privateKeyPath: '' })}
+                  value={formData.privateKeyContent || ""}
+                  onChange={(e) => setFormData({ ...formData, privateKeyContent: e.target.value, privateKeyPath: "" })}
                 />
               )}
             </div>
           )}
 
           <div className="flex justify-end gap-2 pt-4 border-t border-border">
-            <button
-              onClick={onClose}
-              className="px-4 py-2 hover:bg-accent rounded text-sm transition-colors"
-            >
+            <button onClick={onClose} className="px-4 py-2 hover:bg-accent rounded text-sm transition-colors">
               Cancel
             </button>
             <button
@@ -376,7 +367,7 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
               className="px-4 py-2 bg-primary text-primary-foreground rounded text-sm hover:opacity-90 transition-opacity"
             >
               <Save size={14} className="inline mr-1.5" />
-              {site ? 'Save' : 'Add'}
+              {site ? "Save" : "Add"}
             </button>
           </div>
         </div>
@@ -386,4 +377,3 @@ const FtpServerModal: React.FC<FtpServerModalProps> = ({ isOpen, site, onClose, 
 };
 
 export default FtpServerModal;
-

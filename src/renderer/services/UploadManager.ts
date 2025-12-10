@@ -1,8 +1,8 @@
 // Unified Upload Manager
 // Handles all upload types: single file, multiple files, folders, and mixed uploads
 
-import React from 'react';
-import { UploadTaskState, UploadListItem, ConflictResolution } from '../types/upload';
+import React from "react";
+import { UploadTaskState, UploadListItem, ConflictResolution } from "../types/upload";
 
 interface UploadItem {
   name: string;
@@ -18,17 +18,76 @@ interface UploadManagerOptions {
   currentSite: { name?: string; host?: string } | null;
   currentPath: string;
   setActiveUpload: (updater: (prev: UploadTaskState | null) => UploadTaskState | null) => void;
-  setToast: (toast: { message: string; type: 'success' | 'error' | 'info' | 'warning' }) => void;
+  setToast: (toast: { message: string; type: "success" | "error" | "info" | "warning" }) => void;
   handleNavigate: (path: string) => void;
   cancelUploadsRef: React.MutableRefObject<boolean>;
   uploadCompletionToastShownRef: React.MutableRefObject<boolean>;
   currentFileUploadIdRef: React.MutableRefObject<string | null>;
 }
 
-export const startUnifiedUpload = async (
-  items: UploadItem[],
-  options: UploadManagerOptions
-): Promise<void> => {
+// Helper function to collect folder contents recursively
+const collectFolderContents = async (
+  electron: any,
+  localPath: string,
+  remotePath: string
+): Promise<{ items: UploadListItem[]; totalBytes: number; totalFiles: number }> => {
+  const result = await electron.collectLocalEntries(localPath);
+  if (!result.success) {
+    throw new Error(result.error || "Failed to collect folder contents");
+  }
+
+  const items: UploadListItem[] = [];
+  let totalBytes = 0;
+  let totalFiles = 0;
+
+  // Helper to get last part of path
+  const getBaseName = (fullPath: string) => {
+    const parts = fullPath.replace(/\\/g, "/").split("/");
+    return parts[parts.length - 1] || "";
+  };
+
+  // Helper to join paths
+  const joinPath = (...parts: string[]) => {
+    return parts.join("/").replace(/\/+/g, "/").replace(/\\/g, "/");
+  };
+
+  // Process directories first (empty folders)
+  for (const dir of result.directories) {
+    const dirRemotePath = joinPath(remotePath, dir.relativePath);
+    items.push({
+      id: `folder-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: getBaseName(dir.relativePath),
+      localPath: joinPath(localPath, dir.relativePath),
+      remotePath: dirRemotePath,
+      size: 0,
+      isFolder: true,
+      items: [], // Empty folder
+      status: "pending",
+      uploadedBytes: 0,
+    });
+  }
+
+  // Process files
+  for (const file of result.files) {
+    const fileRemotePath = joinPath(remotePath, file.relativePath);
+    items.push({
+      id: `file-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: getBaseName(file.relativePath),
+      localPath: file.localPath,
+      remotePath: fileRemotePath,
+      size: file.size,
+      isFolder: false,
+      status: "pending",
+      uploadedBytes: 0,
+    });
+    totalBytes += file.size;
+    totalFiles += 1;
+  }
+
+  return { items, totalBytes, totalFiles };
+};
+
+export const startUnifiedUpload = async (items: UploadItem[], options: UploadManagerOptions): Promise<void> => {
   const {
     electron,
     settings,
@@ -39,7 +98,7 @@ export const startUnifiedUpload = async (
     handleNavigate,
     cancelUploadsRef,
     uploadCompletionToastShownRef,
-    currentFileUploadIdRef
+    currentFileUploadIdRef,
   } = options;
 
   if (items.length === 0) return;
@@ -49,145 +108,327 @@ export const startUnifiedUpload = async (
   cancelUploadsRef.current = false;
   uploadCompletionToastShownRef.current = false;
 
-  // Create uploadList
-  const uploadList: UploadListItem[] = items.map((item, index) => ({
-    id: `upload-item-${Date.now()}-${index}`,
-    name: item.name,
-    localPath: item.localPath,
-    remotePath: item.remotePath,
-    size: item.size,
-    isFolder: item.isFolder,
-    status: 'pending' as const,
-    uploadedBytes: 0
-  }));
-
-  // Calculate total bytes (only files, folders count as 0)
-  const totalBytes = uploadList.reduce((sum, item) => sum + (item.isFolder ? 0 : item.size), 0);
-
-  // Create session ID
-  const sessionId = `upload-session-${Date.now()}`;
-
-  // Initialize upload state
-  const initialUploadState: UploadTaskState = {
-    id: sessionId,
-    status: 'starting',
-    uploadedBytes: 0,
-    totalBytes,
-    completedFiles: 0,
-    totalFiles: uploadList.length,
-    uploadList,
-    currentItemIndex: undefined,
-    currentFileUploaded: 0,
-    currentFileSize: undefined,
-    currentFileLocalPath: undefined,
-    currentFileRemotePath: undefined,
-    speed: 0,
-    uploadConflictResolution: settings.defaultConflictResolution as ConflictResolution,
-    siteName: currentSite?.name,
-    siteHost: currentSite?.host,
-    cancelRequested: false
-  };
-
-  setActiveUpload(() => initialUploadState);
-
-  // Log initial upload state
-  console.log('[Upload Manager] Initial upload state:', JSON.stringify({
-    id: initialUploadState.id,
-    status: initialUploadState.status,
-    totalFiles: initialUploadState.totalFiles,
-    totalBytes: initialUploadState.totalBytes,
-    uploadList: initialUploadState.uploadList.map(item => ({
-      name: item.name,
-      isFolder: item.isFolder,
-      size: item.size,
-      status: item.status
-    })),
-    uploadConflictResolution: initialUploadState.uploadConflictResolution
-  }, null, 2));
-
-  // Start processing uploadList
-  let uploadedBytes = 0;
-  let completedFiles = 0;
-  let wasCancelled = false;
-
   try {
-    for (let i = 0; i < uploadList.length; i++) {
+    // Build first-level items array with folder contents
+    const firstLevelItems: UploadListItem[] = [];
+    let totalBytes = 0;
+    let totalFiles = 0;
+
+    for (const item of items) {
+      if (item.isFolder) {
+        // Collect folder contents
+        const {
+          items: subItems,
+          totalBytes: folderBytes,
+          totalFiles: folderFiles,
+        } = await collectFolderContents(electron, item.localPath, item.remotePath);
+
+        firstLevelItems.push({
+          id: `folder-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name: item.name,
+          localPath: item.localPath,
+          remotePath: item.remotePath,
+          size: folderBytes, // Total size of all files in folder
+          isFolder: true,
+          items: subItems,
+          status: "pending",
+          uploadedBytes: 0,
+        });
+
+        totalBytes += folderBytes;
+        totalFiles += folderFiles;
+      } else {
+        // Single file
+        firstLevelItems.push({
+          id: `file-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name: item.name,
+          localPath: item.localPath,
+          remotePath: item.remotePath,
+          size: item.size,
+          isFolder: false,
+          status: "pending",
+          uploadedBytes: 0,
+        });
+
+        totalBytes += item.size;
+        totalFiles += 1;
+      }
+    }
+
+    // Create session ID
+    const sessionId = `upload-session-${Date.now()}`;
+
+    // Initialize upload state
+    const initialUploadState: UploadTaskState = {
+      id: sessionId,
+      status: "starting",
+      uploadedBytes: 0,
+      totalBytes,
+      completedFiles: 0,
+      totalFiles,
+      items: firstLevelItems,
+      currentItem: undefined,
+      speed: 0,
+      uploadConflictResolution: settings.defaultConflictResolution as ConflictResolution,
+      sessionConflictResolutionApplied: false,
+      siteName: currentSite?.name,
+      siteHost: currentSite?.host,
+      cancelRequested: false,
+    };
+
+    setActiveUpload(() => initialUploadState);
+
+    // Log initial upload state
+    console.log("[Upload Manager] Initial upload state:", {
+      id: initialUploadState.id,
+      status: initialUploadState.status,
+      totalFiles: initialUploadState.totalFiles,
+      totalBytes: initialUploadState.totalBytes,
+      itemsCount: initialUploadState.items.length,
+    });
+
+    // Start processing items with DFS
+    let wasCancelled = false;
+
+    // Get current conflict resolution from state
+    let conflictResolution: ConflictResolution = settings.defaultConflictResolution as ConflictResolution;
+    let sessionConflictResolutionApplied = false;
+
+    // Speed tracking for ETA - maintain rolling average for stability
+    let sessionStartTime = Date.now();
+    const speedSamples: number[] = []; // Store recent speed samples
+    const MAX_SPEED_SAMPLES = 5; // Keep last 5 samples for rolling average
+
+    // DFS upload function
+    const uploadItemDFS = async (item: UploadListItem, parentPath: string = ""): Promise<boolean> => {
+      if (cancelUploadsRef.current) {
+        return false; // Stop processing
+      }
+
+      // Update current item if it's a file
+      if (!item.isFolder) {
+        setActiveUpload((prev) => {
+          if (!prev) return prev;
+          // Don't override status if it's already 'cancelling'
+          if (prev.status === "cancelling") {
+            return { ...prev, currentItem: item };
+          }
+          return {
+            ...prev,
+            currentItem: item,
+            status: "uploading",
+          };
+        });
+      }
+
+      // Mark item as uploading
+      item.status = "uploading";
+
+      if (item.isFolder) {
+        // Process folder: create directory and upload contents
+        console.log("[Upload Manager] Processing folder:", {
+          name: item.name,
+          remotePath: item.remotePath,
+          subItems: item.items?.length || 0,
+        });
+
+        // Create empty folder on server
+        try {
+          const createResult = await electron.createDirectory(item.remotePath);
+          if (!createResult.success) {
+            console.error("[Upload Manager] Failed to create folder:", {
+              name: item.name,
+              error: createResult.error,
+            });
+            item.status = "failed";
+            item.error = createResult.error || "Failed to create folder";
+            setActiveUpload((prev) => {
+              if (!prev) return prev;
+              return { ...prev };
+            });
+            return true; // Continue with next item
+          }
+        } catch (err: any) {
+          console.error("[Upload Manager] Exception creating folder:", {
+            name: item.name,
+            error: err.message,
+          });
+          item.status = "failed";
+          item.error = err.message;
+          setActiveUpload((prev) => {
+            if (!prev) return prev;
+            return { ...prev };
+          });
+          return true; // Continue with next item
+        }
+
+        // Upload sub-items
+        if (item.items && item.items.length > 0) {
+          for (const subItem of item.items) {
+            const success = await uploadItemDFS(subItem, item.remotePath);
+            if (!success) {
+              return false; // Cancelled
+            }
+          }
+        }
+
+        // Mark folder as completed
+        item.status = "completed";
+        setActiveUpload((prev) => {
+          if (!prev) return prev;
+          return { ...prev };
+        });
+      } else {
+        // Upload file
+        console.log("[Upload Manager] Uploading file:", {
+          name: item.name,
+          size: item.size,
+          remotePath: item.remotePath,
+        });
+
+        // Check for cancellation before starting upload
+        if (cancelUploadsRef.current) {
+          return false;
+        }
+
+        // Create uploadId for this file
+        const fileUploadId = `${sessionId}-${item.name}-${Math.random().toString(36).slice(2, 6)}`;
+        currentFileUploadIdRef.current = fileUploadId;
+
+        // Set currentItem BEFORE starting upload (for real-time progress from backend)
+        setActiveUpload((prev) => {
+          if (!prev) return prev;
+          // Don't override status if it's already 'cancelling'
+          if (prev.status === "cancelling") {
+            return {
+              ...prev,
+              currentItem: {
+                id: item.id,
+                name: item.name,
+                localPath: item.localPath,
+                remotePath: item.remotePath,
+                size: item.size,
+                isFolder: false,
+                uploadedBytes: 0,
+                status: "uploading",
+              },
+            };
+          }
+          return {
+            ...prev,
+            currentItem: {
+              id: item.id,
+              name: item.name,
+              localPath: item.localPath,
+              remotePath: item.remotePath,
+              size: item.size,
+              isFolder: false,
+              uploadedBytes: 0,
+              status: "uploading",
+            },
+            status: "uploading",
+          };
+        });
+
+        // Start file upload
+        // For nested files (inside folders), always use "overwrite" to avoid duplicate dialogs
+        // because folder-level conflict has already been resolved
+        const fileResult = await electron.upload(item.localPath, item.remotePath, fileUploadId, "overwrite");
+
+        if (!fileResult.success) {
+          if (cancelUploadsRef.current || (fileResult.error && fileResult.error.includes("cancelled"))) {
+            console.log("[Upload] Upload cancelled:", { fileName: item.name });
+            // Clear currentItem when cancelled
+            setActiveUpload((prev) => {
+              if (!prev) return prev;
+              return { ...prev, currentItem: undefined };
+            });
+            return false;
+          }
+
+          // Mark as failed
+          item.status = "failed";
+          item.error = fileResult.error || "Unknown error";
+          setActiveUpload((prev) => {
+            if (!prev) return prev;
+            return { ...prev, currentItem: undefined };
+          });
+        } else {
+          // File upload completed successfully
+          item.status = "completed";
+          item.uploadedBytes = item.size;
+
+          setActiveUpload((prev) => {
+            if (!prev) return prev;
+
+            const newUploadedBytes = prev.uploadedBytes + item.size;
+            const newCompletedFiles = prev.completedFiles + 1;
+
+            // Calculate session average speed
+            const now = Date.now();
+            const sessionElapsed = (now - sessionStartTime) / 1000; // seconds
+            const sessionAvgSpeed = sessionElapsed > 0 ? newUploadedBytes / sessionElapsed : 0;
+
+            // Add session average to speed samples for rolling average
+            if (sessionAvgSpeed > 0) {
+              speedSamples.push(sessionAvgSpeed);
+              if (speedSamples.length > MAX_SPEED_SAMPLES) {
+                speedSamples.shift(); // Remove oldest sample
+              }
+            }
+
+            // Calculate rolling average from speed samples
+            const rollingAvgSpeed =
+              speedSamples.length > 0 ? speedSamples.reduce((sum, s) => sum + s, 0) / speedSamples.length : sessionAvgSpeed;
+
+            console.log("[Upload Manager] File upload completed:", {
+              name: item.name,
+              size: item.size,
+              uploadedBytes: newUploadedBytes,
+              completedFiles: newCompletedFiles,
+              sessionAvgSpeed,
+              rollingAvgSpeed,
+              speedSamples: speedSamples.length,
+            });
+
+            return {
+              ...prev,
+              uploadedBytes: newUploadedBytes,
+              completedFiles: newCompletedFiles,
+              speed: rollingAvgSpeed, // Use rolling average for stable ETA
+              currentItem: undefined, // Clear currentItem after file completes
+            };
+          });
+        }
+      }
+
+      return true; // Continue
+    };
+
+    // Process all first-level items
+    for (const item of firstLevelItems) {
       // Check for cancellation
       if (cancelUploadsRef.current) {
-        console.log('[Upload] Upload session cancelled, stopping at item:', { index: i, name: uploadList[i].name });
         wasCancelled = true;
         break;
       }
 
-      const item = uploadList[i];
-
-      console.log('[Upload Manager] Processing item:', {
-        index: i,
-        name: item.name,
-        isFolder: item.isFolder,
-        localPath: item.localPath,
-        remotePath: item.remotePath
-      });
-
-      // Update current item index
+      // Handle conflict resolution for first-level items ONLY
+      // Read current state for conflict resolution
       setActiveUpload((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          currentItemIndex: i,
-          currentFileLocalPath: item.localPath,
-          currentFileRemotePath: item.remotePath,
-          currentFileSize: item.isFolder ? undefined : item.size,
-          currentFileUploaded: 0
-        };
+        if (prev) {
+          conflictResolution = prev.uploadConflictResolution;
+          sessionConflictResolutionApplied = prev.sessionConflictResolutionApplied || false;
+        }
+        return prev;
       });
 
-      // Mark item as uploading
-      const updatedList = [...uploadList];
-      updatedList[i] = { ...item, status: 'uploading' };
-      setActiveUpload((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          uploadList: updatedList,
-          status: 'uploading'
-        };
-      });
+      const shouldShowDialog = (conflictResolution === "prompt" || conflictResolution === "ask") && !sessionConflictResolutionApplied;
 
-      // Get current conflict resolution from state - read it fresh each time
-      // We need to read it from the actual state, not from a closure variable
-      let conflictResolution: ConflictResolution = settings.defaultConflictResolution as ConflictResolution;
-      
-      // Read current conflict resolution from state - use a synchronous read
-      // Since setActiveUpload is synchronous for reading, we can get the current value
-      let currentState: UploadTaskState | null = null;
-      setActiveUpload((prev) => {
-        currentState = prev;
-        return prev; // Don't modify, just read
-      });
-      
-      if (currentState?.uploadConflictResolution) {
-        conflictResolution = currentState.uploadConflictResolution;
-      }
-      
-      // Log current conflict resolution
-      console.log('[Upload Manager] Processing item with conflict resolution:', {
-        itemIndex: i,
-        itemName: item.name,
-        conflictResolution,
-        defaultConflictResolution: settings.defaultConflictResolution,
-        sessionConflictResolution: currentState?.uploadConflictResolution
-      });
-
-      // Handle empty folders (they need to be created on the server)
       if (item.isFolder) {
-        // This is an empty folder that needs to be created
-        console.log('[Upload Manager] Creating empty folder:', { name: item.name, remotePath: item.remotePath });
-        
-        // Check for folder conflict
-        const shouldShowDialog = conflictResolution === 'prompt' || conflictResolution === 'ask';
+        // Check for folder conflict (only for top-level folders)
         let folderRemotePath = item.remotePath;
-        
+
         if (shouldShowDialog) {
           const folderExists = await electron.checkRemoteExists?.(item.remotePath);
           if (folderExists?.exists) {
@@ -196,361 +437,295 @@ export const startUnifiedUpload = async (
               fileName: item.name,
               duplicateAction: null,
               applyToAll: false,
-              defaultConflictResolution: conflictResolution
+              defaultConflictResolution: conflictResolution,
+              showApplyToAll: firstLevelItems.length > 1, // Show "apply to all" only if multiple items in session
             });
-            
+
             if (duplicateResult?.cancelled || duplicateResult?.dialogCancelled) {
               cancelUploadsRef.current = true;
               wasCancelled = true;
-              setToast({ message: 'Upload cancelled', type: 'warning' });
+              setToast({ message: "Upload cancelled", type: "warning" });
               break;
             }
-            
+
             if (duplicateResult?.skipped) {
               if (duplicateResult.applyToAll && duplicateResult.duplicateAction) {
                 conflictResolution = duplicateResult.duplicateAction as ConflictResolution;
+                sessionConflictResolutionApplied = true;
                 setActiveUpload((prev) => {
                   if (!prev) return prev;
                   return {
                     ...prev,
-                    uploadConflictResolution: conflictResolution
+                    uploadConflictResolution: conflictResolution,
+                    sessionConflictResolutionApplied: true,
                   };
                 });
               }
-              const skippedList = [...updatedList];
-              skippedList[i] = { ...item, status: 'skipped' };
-              completedFiles++;
-              setActiveUpload((prev) => {
-                if (!prev) return prev;
-                return {
-                  ...prev,
-                  uploadList: skippedList,
-                  completedFiles
-                };
-              });
+              item.status = "skipped";
               continue;
             }
-            
+
             if (duplicateResult?.remotePath) {
               folderRemotePath = duplicateResult.remotePath;
             }
-            
+
             if (duplicateResult.applyToAll && duplicateResult.duplicateAction) {
               conflictResolution = duplicateResult.duplicateAction as ConflictResolution;
+              sessionConflictResolutionApplied = true;
               setActiveUpload((prev) => {
                 if (!prev) return prev;
                 return {
                   ...prev,
-                  uploadConflictResolution: conflictResolution
+                  uploadConflictResolution: conflictResolution,
+                  sessionConflictResolutionApplied: true,
                 };
               });
             }
           }
-        } else if (conflictResolution === 'skip') {
-          const folderExists = await electron.checkRemoteExists?.(item.remotePath);
-          if (folderExists?.exists) {
-            const skippedList = [...updatedList];
-            skippedList[i] = { ...item, status: 'skipped' };
-            completedFiles++;
-            setActiveUpload((prev) => {
-              if (!prev) return prev;
-              return {
-                ...prev,
-                uploadList: skippedList,
-                completedFiles
-              };
-            });
-            continue;
-          }
-        } else if (conflictResolution === 'rename') {
-          const folderExists = await electron.checkRemoteExists?.(item.remotePath);
-          if (folderExists?.exists) {
-            const renameResult: any = await electron.handleUploadDuplicate?.({
-              remotePath: item.remotePath,
-              fileName: item.name,
-              duplicateAction: 'rename',
-              applyToAll: false,
-              defaultConflictResolution: 'rename'
-            });
-            if (renameResult?.remotePath) {
-              folderRemotePath = renameResult.remotePath;
+        } else if (sessionConflictResolutionApplied) {
+          // Apply session resolution
+          if (conflictResolution === "skip") {
+            const folderExists = await electron.checkRemoteExists?.(item.remotePath);
+            if (folderExists?.exists) {
+              item.status = "skipped";
+              continue;
+            }
+          } else if (conflictResolution === "rename") {
+            const folderExists = await electron.checkRemoteExists?.(item.remotePath);
+            if (folderExists?.exists) {
+              const renameResult: any = await electron.handleUploadDuplicate?.({
+                remotePath: item.remotePath,
+                fileName: item.name,
+                duplicateAction: "rename",
+                applyToAll: false,
+                defaultConflictResolution: "rename",
+                showApplyToAll: false,
+              });
+              if (renameResult?.remotePath) {
+                folderRemotePath = renameResult.remotePath;
+              }
             }
           }
-        }
-        
-        // Create the folder on the server
-        try {
-          const createResult = await electron.createDirectory(folderRemotePath);
-          if (createResult.success) {
-            const completedList = [...updatedList];
-            completedList[i] = { ...item, status: 'completed', remotePath: folderRemotePath };
-            completedFiles++;
-            setActiveUpload((prev) => {
-              if (!prev) return prev;
-              return {
-                ...prev,
-                uploadList: completedList,
-                completedFiles
-              };
-            });
-          } else {
-            const failedList = [...updatedList];
-            failedList[i] = { ...item, status: 'failed', error: createResult.error || 'Unknown error' };
-            completedFiles++;
-            setActiveUpload((prev) => {
-              if (!prev) return prev;
-              return {
-                ...prev,
-                uploadList: failedList,
-                completedFiles
-              };
-            });
+          // For overwrite, continue with original path
+        } else if (conflictResolution === "rename" || conflictResolution === "overwrite") {
+          // Auto-apply rename or overwrite without dialog
+          if (conflictResolution === "rename") {
+            const folderExists = await electron.checkRemoteExists?.(item.remotePath);
+            if (folderExists?.exists) {
+              const renameResult: any = await electron.handleUploadDuplicate?.({
+                remotePath: item.remotePath,
+                fileName: item.name,
+                duplicateAction: "rename",
+                applyToAll: false,
+                defaultConflictResolution: "rename",
+                showApplyToAll: false,
+              });
+              if (renameResult?.remotePath) {
+                folderRemotePath = renameResult.remotePath;
+              }
+            }
           }
-        } catch (err: any) {
-          const failedList = [...updatedList];
-          failedList[i] = { ...item, status: 'failed', error: err.message || 'Unknown error' };
-          completedFiles++;
-          setActiveUpload((prev) => {
-            if (!prev) return prev;
-            return {
-              ...prev,
-              uploadList: failedList,
-              completedFiles
-            };
-          });
+          // For overwrite, continue with original path
         }
-        continue;
-      }
 
-      {
-        // Handle file upload
-        let remotePath = item.remotePath;
+        // Update folder remote path and all sub-items if renamed
+        if (folderRemotePath !== item.remotePath) {
+          const oldRemotePath = item.remotePath;
+          item.remotePath = folderRemotePath;
 
-        // Handle duplicate file
-        // Use the session conflict resolution if it's not 'prompt' or 'ask'
-        const shouldShowDialog = conflictResolution === 'prompt' || conflictResolution === 'ask';
-        const duplicateActionToUse = !shouldShowDialog ? conflictResolution : null;
-        
+          // Update all sub-items' remote paths
+          const updateSubItemPaths = (items: UploadListItem[], oldBase: string, newBase: string) => {
+            for (const subItem of items) {
+              subItem.remotePath = subItem.remotePath.replace(oldBase, newBase);
+              if (subItem.items) {
+                updateSubItemPaths(subItem.items, oldBase, newBase);
+              }
+            }
+          };
+
+          if (item.items) {
+            updateSubItemPaths(item.items, oldRemotePath, folderRemotePath);
+          }
+        }
+      } else {
+        // File conflict resolution (only for top-level files)
+        let fileRemotePath = item.remotePath;
+
         if (shouldShowDialog) {
           const duplicateResult: any = await electron.handleUploadDuplicate?.({
             remotePath: item.remotePath,
             fileName: item.name,
-            duplicateAction: duplicateActionToUse,
+            duplicateAction: null,
             applyToAll: false,
-            defaultConflictResolution: conflictResolution
+            defaultConflictResolution: conflictResolution,
+            showApplyToAll: firstLevelItems.length > 1, // Show "apply to all" only if multiple items in session
           });
 
           if (duplicateResult?.cancelled || duplicateResult?.dialogCancelled) {
             cancelUploadsRef.current = true;
             wasCancelled = true;
-            setToast({ message: 'Upload cancelled', type: 'warning' });
+            setToast({ message: "Upload cancelled", type: "warning" });
             break;
           }
 
           if (duplicateResult?.skipped) {
-            // Update conflict resolution if "apply to all" was checked
             if (duplicateResult.applyToAll && duplicateResult.duplicateAction) {
+              conflictResolution = duplicateResult.duplicateAction as ConflictResolution;
+              sessionConflictResolutionApplied = true;
               setActiveUpload((prev) => {
                 if (!prev) return prev;
                 return {
                   ...prev,
-                  uploadConflictResolution: duplicateResult.duplicateAction as ConflictResolution
+                  uploadConflictResolution: conflictResolution,
+                  sessionConflictResolutionApplied: true,
                 };
               });
             }
-
-            // Mark item as skipped
-            const skippedList = [...updatedList];
-            skippedList[i] = { ...item, status: 'skipped' };
-            completedFiles++;
-            uploadedBytes += item.size;
+            item.status = "skipped";
             setActiveUpload((prev) => {
               if (!prev) return prev;
               return {
                 ...prev,
-                uploadList: skippedList,
-                completedFiles,
-                uploadedBytes
+                uploadedBytes: prev.uploadedBytes + item.size,
+                completedFiles: prev.completedFiles + 1,
               };
             });
             continue;
           }
 
-          // Update remote path if renamed
           if (duplicateResult?.remotePath) {
-            remotePath = duplicateResult.remotePath;
-            updatedList[i] = { ...item, remotePath };
+            fileRemotePath = duplicateResult.remotePath;
+            item.remotePath = fileRemotePath;
           }
 
-          // Update conflict resolution if "apply to all" was checked
           if (duplicateResult.applyToAll && duplicateResult.duplicateAction) {
             conflictResolution = duplicateResult.duplicateAction as ConflictResolution;
+            sessionConflictResolutionApplied = true;
             setActiveUpload((prev) => {
               if (!prev) return prev;
               return {
                 ...prev,
                 uploadConflictResolution: conflictResolution,
-                uploadList: updatedList
+                sessionConflictResolutionApplied: true,
               };
             });
-            console.log('[Upload Manager] Updated conflict resolution (apply to all):', conflictResolution);
           }
-        } else if (duplicateActionToUse) {
-          // Use the session conflict resolution without showing dialog
-          // Check if file exists and apply the resolution
+        } else if (sessionConflictResolutionApplied) {
+          // Apply session resolution without showing dialog
           const existsResult = await electron.checkRemoteExists?.(item.remotePath);
           if (existsResult?.exists) {
-            if (duplicateActionToUse === 'skip') {
-              // Mark item as skipped
-              const skippedList = [...updatedList];
-              skippedList[i] = { ...item, status: 'skipped' };
-              completedFiles++;
-              uploadedBytes += item.size;
+            if (conflictResolution === "skip") {
+              item.status = "skipped";
               setActiveUpload((prev) => {
                 if (!prev) return prev;
                 return {
                   ...prev,
-                  uploadList: skippedList,
-                  completedFiles,
-                  uploadedBytes
+                  uploadedBytes: prev.uploadedBytes + item.size,
+                  completedFiles: prev.completedFiles + 1,
                 };
               });
               continue;
-            } else if (duplicateActionToUse === 'rename') {
-              // Generate new name
-              const pathParts = item.remotePath.split('/');
-              const fileName = pathParts.pop() || item.name;
-              const dirPath = pathParts.join('/') || '/';
-              const newName = await electron.handleUploadDuplicate?.({
+            } else if (conflictResolution === "rename") {
+              const renameResult: any = await electron.handleUploadDuplicate?.({
                 remotePath: item.remotePath,
                 fileName: item.name,
-                duplicateAction: 'rename',
+                duplicateAction: "rename",
                 applyToAll: false,
-                defaultConflictResolution: 'rename'
+                defaultConflictResolution: "rename",
+                showApplyToAll: false,
               });
-              if (newName?.remotePath) {
-                remotePath = newName.remotePath;
-                updatedList[i] = { ...item, remotePath };
+              if (renameResult?.remotePath) {
+                item.remotePath = renameResult.remotePath;
               }
             }
-            // For 'overwrite', just continue with the upload
+            // For overwrite, continue with original path
+          }
+        } else if (conflictResolution === "rename" || conflictResolution === "overwrite") {
+          // Auto-apply rename or overwrite without dialog
+          const existsResult = await electron.checkRemoteExists?.(item.remotePath);
+          if (existsResult?.exists) {
+            if (conflictResolution === "rename") {
+              const renameResult: any = await electron.handleUploadDuplicate?.({
+                remotePath: item.remotePath,
+                fileName: item.name,
+                duplicateAction: "rename",
+                applyToAll: false,
+                defaultConflictResolution: "rename",
+                showApplyToAll: false,
+              });
+              if (renameResult?.remotePath) {
+                item.remotePath = renameResult.remotePath;
+              }
+            }
+            // For overwrite, continue with original path
           }
         }
-
-        // Check for cancellation before starting upload
-        if (cancelUploadsRef.current) {
-          console.log('[Upload] Upload cancelled before starting file upload:', { fileName: item.name });
-          wasCancelled = true;
-          break;
-        }
-
-        // Create uploadId for this file
-        const fileUploadId = `${sessionId}-${item.name}-${Math.random().toString(36).slice(2, 6)}`;
-        currentFileUploadIdRef.current = fileUploadId;
-
-        // Start file upload
-        const fileResult = await electron.upload(item.localPath, remotePath, fileUploadId, conflictResolution);
-
-        if (!fileResult.success) {
-          if (cancelUploadsRef.current || (fileResult.error && fileResult.error.includes('cancelled'))) {
-            console.log('[Upload] Upload cancelled:', { fileName: item.name });
-            wasCancelled = true;
-            break;
-          }
-
-          // Mark as failed
-          const failedList = [...updatedList];
-          failedList[i] = { ...item, status: 'failed', error: fileResult.error || 'Unknown error' };
-          completedFiles++;
-          setActiveUpload((prev) => {
-            if (!prev) return prev;
-            return {
-              ...prev,
-              uploadList: failedList,
-              completedFiles
-            };
-          });
-          continue;
-        }
-
-        // File upload completed successfully
-        uploadedBytes += item.size;
-        completedFiles++;
-
-        // Mark item as completed
-        const completedList = [...updatedList];
-        completedList[i] = { ...item, status: 'completed', uploadedBytes: item.size };
-        setActiveUpload((prev) => {
-          if (!prev) return prev;
-          const updated = {
-            ...prev,
-            uploadList: completedList,
-            uploadedBytes,
-            completedFiles
-          };
-          // Log state after item completion
-          console.log('[Upload Manager] Item completed, current state:', JSON.stringify({
-            id: updated.id,
-            status: updated.status,
-            completedFiles: updated.completedFiles,
-            totalFiles: updated.totalFiles,
-            uploadedBytes: updated.uploadedBytes,
-            totalBytes: updated.totalBytes,
-            currentItemIndex: updated.currentItemIndex,
-            uploadConflictResolution: updated.uploadConflictResolution,
-            uploadList: updated.uploadList.map(item => ({
-              name: item.name,
-              isFolder: item.isFolder,
-              status: item.status
-            }))
-          }, null, 2));
-          return updated;
-        });
       }
 
-      // Check for cancellation after each item
-      if (cancelUploadsRef.current) {
+      // Upload item using DFS (this will NOT check conflicts for nested items)
+      const success = await uploadItemDFS(item);
+      if (!success) {
         wasCancelled = true;
         break;
       }
     }
 
     // All items processed
-    const allCompleted = completedFiles === uploadList.length;
+    const allCompleted = firstLevelItems.every((item) => item.status === "completed" || item.status === "skipped");
 
     setActiveUpload((prev) => {
       if (!prev) return prev;
       return {
         ...prev,
-        status: wasCancelled ? 'cancelled' : (allCompleted ? 'completed' : 'failed')
+        status: wasCancelled ? "cancelled" : allCompleted ? "completed" : "failed",
+        currentItem: undefined,
       };
     });
 
-    // Show completion toast
-    if (allCompleted && !wasCancelled) {
+    // Show completion or cancellation toast with specific item names
+    const getItemsDescription = (): string => {
+      if (firstLevelItems.length === 1) return firstLevelItems[0].name;
+      if (firstLevelItems.length === 2) return `${firstLevelItems[0].name}, ${firstLevelItems[1].name}`;
+      if (firstLevelItems.length === 3) return `${firstLevelItems[0].name}, ${firstLevelItems[1].name}, ${firstLevelItems[2].name}`;
+      return `${firstLevelItems[0].name}, ${firstLevelItems[1].name}, ... (${firstLevelItems.length} items)`;
+    };
+
+    const itemsDesc = getItemsDescription();
+
+    if (wasCancelled) {
       setTimeout(() => {
-        setToast({ message: 'Uploaded files successfully', type: 'success' });
+        setToast({ message: `Upload cancelled: ${itemsDesc}`, type: "warning" });
+      }, 0);
+    } else if (allCompleted && !uploadCompletionToastShownRef.current) {
+      uploadCompletionToastShownRef.current = true;
+      setTimeout(() => {
+        setToast({ message: `Upload completed: ${itemsDesc}`, type: "success" });
       }, 0);
     }
-
   } catch (error: any) {
-    console.error('[Error] Upload session error:', error);
+    console.error("[Error] Upload session error:", error);
     setActiveUpload((prev) => {
       if (!prev) return prev;
       return {
         ...prev,
-        status: 'failed'
+        status: "failed",
       };
     });
-    setToast({ message: `Upload failed: ${error.message || 'Unknown error'}`, type: 'error' });
+    setToast({ message: `Upload failed: ${error.message || "Unknown error"}`, type: "error" });
   } finally {
-    // Clean up after delay
-    setTimeout(() => {
-      setActiveUpload(null);
-      cancelUploadsRef.current = false;
-      currentFileUploadIdRef.current = null;
-      handleNavigate(currentPath);
-    }, wasCancelled ? 1000 : 1500);
+    // Clean up after delay and refresh file list
+    const wasCancelled = cancelUploadsRef.current;
+
+    // Refresh file list for both success and cancellation
+    await handleNavigate(currentPath);
+
+    setTimeout(
+      () => {
+        setActiveUpload(() => null);
+        cancelUploadsRef.current = false;
+        currentFileUploadIdRef.current = null;
+      },
+      wasCancelled ? 1000 : 1500
+    );
   }
 };
-
