@@ -3,7 +3,7 @@
   "productName": "MacFTP",
   "version": "1.0.0",
   "description": "FTP/SFTP Client for macOS - A modern file transfer application",
-  "main": "dist-electron/main.js",
+  "main": "dist-electron/main/main.js",
   "scripts": {
     "dev": "concurrently \"npm run dev:electron\" \"npm run dev:vite\"",
     "dev:vite": "vite",
